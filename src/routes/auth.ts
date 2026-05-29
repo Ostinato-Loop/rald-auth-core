@@ -295,7 +295,7 @@ auth.post("/verify-login-email-otp", async (c) => {
   if (!payload || (payload as unknown as Record<string, unknown>).purpose !== "email-otp-login")
     return c.json({ error: "Invalid or expired session. Request a new code." }, 401);
 
-  const { email, codeHash } = payload as Record<string, string>;
+  const { email, codeHash } = payload as unknown as Record<string, string>;
   if (!email || !codeHash) return c.json({ error: "Invalid session data" }, 400);
 
   const inputHash = await hashOtpCode(body.code.trim());
