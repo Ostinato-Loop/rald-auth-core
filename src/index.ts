@@ -93,8 +93,6 @@ app.route("/provision", provisionRoutes);
 // ── Root ──────────────────────────────────────────────────────────────────────
 app.get("/", (c) =>
   c.json({
-    service: "RALD Auth",
-    version: "1.0.0",
     docs: "https://auth.rald.cloud/health",
     ...serviceInfo(c),
   })
