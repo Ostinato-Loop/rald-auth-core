@@ -209,10 +209,10 @@ auth.post("/register-from-otp", async (c) => {
     return c.json({ error: "otpToken, name, and email are required" }, 400);
 
   const payload = await verifyJwt(body.otpToken, c.env.RALD_JWT_SECRET);
-  if (!payload || (payload as Record<string, unknown>).purpose !== "phone-verified")
+  if (!payload || (payload as unknown as Record<string, unknown>).purpose !== "phone-verified")
     return c.json({ error: "Invalid or expired phone verification token" }, 401);
 
-  const phone = (payload as Record<string, string>).phone;
+  const phone = (payload as unknown as Record<string, string>).phone;
   if (!phone) return c.json({ error: "Phone missing from token" }, 400);
 
   const email = body.email.trim().toLowerCase();
@@ -292,7 +292,7 @@ auth.post("/verify-login-email-otp", async (c) => {
     return c.json({ error: "sessionToken and code are required" }, 400);
 
   const payload = await verifyJwt(body.sessionToken, c.env.RALD_JWT_SECRET);
-  if (!payload || (payload as Record<string, unknown>).purpose !== "email-otp-login")
+  if (!payload || (payload as unknown as Record<string, unknown>).purpose !== "email-otp-login")
     return c.json({ error: "Invalid or expired session. Request a new code." }, 401);
 
   const { email, codeHash } = payload as Record<string, string>;
