@@ -1,0 +1,27 @@
+name = "rald-auth"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = []
+
+[vars]
+ENVIRONMENT = "production"
+
+# Secrets — set via: wrangler secret put <NAME>
+# Required:
+#   SUPABASE_URL
+#   SUPABASE_SERVICE_ROLE_KEY
+#   RALD_JWT_SECRET          — 64-char base64url JWT signing secret
+#   TERMII_API_KEY           — SMS OTP (https://termii.com)
+#   TERMII_SENDER_ID         — Registered sender ID (e.g. "RALD")
+#   RESEND_API_KEY           — Email OTP / transactional email (https://resend.com)
+
+[[routes]]
+pattern = "auth.rald.cloud/*"
+zone_name = "rald.cloud"
+
+[build]
+command = ""
+
+[observability]
+enabled = true
+head_sampling_rate = 1
