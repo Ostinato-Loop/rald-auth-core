@@ -7,9 +7,10 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { JwtPayload } from "./lib/auth";
-import authRoutes from "./routes/auth";
-import devicesRoutes from "./routes/devices";
-import ssoRoutes from "./routes/sso";
+import authRoutes      from "./routes/auth";
+import devicesRoutes   from "./routes/devices";
+import ssoRoutes       from "./routes/sso";
+import clerkRoutes     from "./routes/clerk";
 import provisionRoutes from "./routes/provision";
 
 export type Bindings = {
@@ -19,6 +20,8 @@ export type Bindings = {
   TERMII_API_KEY: string;
   TERMII_SENDER_ID: string;
   RESEND_API_KEY: string;
+  CLERK_SECRET_KEY: string;
+  CLERK_PUBLISHABLE_KEY: string;
   ENVIRONMENT: string;
 };
 
@@ -36,12 +39,14 @@ app.use(
     origin: [
       "https://rald.cloud",
       "https://app.rald.cloud",
-      "https://admin.rald.cloud",
+      "https://accounts.rald.cloud",
       "https://auth.rald.cloud",
+      "https://identity.rald.cloud",
       "https://loop.rald.cloud",
       "https://messenger.rald.cloud",
       "https://business.rald.cloud",
       "https://payrald.rald.cloud",
+      "https://admin.rald.cloud",
       "https://rald-auth-ui.pages.dev",
       "https://rald-app.pages.dev",
       "https://rald-control-center.pages.dev",
@@ -63,21 +68,22 @@ app.use("*", async (c, next) => {
 // ── Health ────────────────────────────────────────────────────────────────────
 const serviceInfo = (c: { env: Bindings }) => ({
   service: "rald-auth",
-  version: "1.0.0",
+  version: "1.1.0",
   environment: c.env.ENVIRONMENT ?? "production",
   owner: "LILCKY STUDIO LIMITED",
   timestamp: new Date().toISOString(),
 });
 
-app.get("/health", (c) => c.json({ status: "ok", ...serviceInfo(c) }));
+app.get("/health",  (c) => c.json({ status: "ok", ...serviceInfo(c) }));
 app.get("/healthz", (c) => c.json({ status: "ok", ...serviceInfo(c) }));
-app.get("/ready", (c) =>
+app.get("/ready",   (c) =>
   c.json({
     ready: true,
     checks: {
       supabase: !!c.env.SUPABASE_URL,
-      termii: !!c.env.TERMII_API_KEY,
-      resend: !!c.env.RESEND_API_KEY,
+      termii:   !!c.env.TERMII_API_KEY,
+      resend:   !!c.env.RESEND_API_KEY,
+      clerk:    !!c.env.CLERK_SECRET_KEY,
     },
     ...serviceInfo(c),
   })
@@ -85,17 +91,15 @@ app.get("/ready", (c) =>
 app.get("/version", (c) => c.json(serviceInfo(c)));
 
 // ── Routes ────────────────────────────────────────────────────────────────────
-app.route("/auth", authRoutes);
-app.route("/devices", devicesRoutes);
-app.route("/sso", ssoRoutes);
+app.route("/auth",      authRoutes);
+app.route("/devices",   devicesRoutes);
+app.route("/sso",       ssoRoutes);
+app.route("/sso",       clerkRoutes);
 app.route("/provision", provisionRoutes);
 
 // ── Root ──────────────────────────────────────────────────────────────────────
 app.get("/", (c) =>
-  c.json({
-    docs: "https://auth.rald.cloud/health",
-    ...serviceInfo(c),
-  })
+  c.json({ docs: "https://auth.rald.cloud/health", ...serviceInfo(c) })
 );
 
 app.notFound((c) => c.json({ error: "Not found", path: c.req.path }, 404));
