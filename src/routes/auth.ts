@@ -57,9 +57,18 @@ auth.post("/login", async (c) => {
     return c.json({ error: "Invalid email or password" }, 401);
 
   const token = await signJwt(
-    { id: user.id, email: user.email, role: user.role },
+    { id: user.id, email: user.email, role: user.role, iss: "rald.cloud" },
     c.env.RALD_JWT_SECRET
   );
+  // Write session record (fire-and-forget)
+  db.from("sessions").insert({
+    user_id: user.id,
+    created_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + 86400 * 1000).toISOString(),
+    ip_address: c.req.header("CF-Connecting-IP") ?? null,
+    user_agent: c.req.header("User-Agent") ?? null,
+  }).then(() => {}).catch((e: unknown) => console.error("Session write:", e));
+
   return c.json({ token, user: userShape(user) });
 });
 
