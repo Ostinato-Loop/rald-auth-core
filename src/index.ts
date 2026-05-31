@@ -50,6 +50,14 @@ app.use(
       "https://rald-auth-ui.pages.dev",
       "https://rald-app.pages.dev",
       "https://rald-control-center.pages.dev",
+      "https://profiles.rald.cloud",
+      "https://profile.rald.cloud",
+      "https://credentials.rald.cloud",
+      "https://sdk.rald.cloud",
+      "https://console.rald.cloud",
+      "https://silicon.rald.cloud",
+      "https://control.rald.cloud",
+      "https://sv.rald.cloud",
       "http://localhost:5173",
       "http://localhost:3000",
     ],
@@ -68,7 +76,7 @@ app.use("*", async (c, next) => {
 // ── Health ────────────────────────────────────────────────────────────────────
 const serviceInfo = (c: { env: Bindings }) => ({
   service: "rald-auth",
-  version: "1.1.0",
+  version: "1.2.0",
   environment: c.env.ENVIRONMENT ?? "production",
   owner: "LILCKY STUDIO LIMITED",
   timestamp: new Date().toISOString(),
