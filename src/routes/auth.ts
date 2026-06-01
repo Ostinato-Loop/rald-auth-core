@@ -60,11 +60,14 @@ auth.post("/login", async (c) => {
     { id: user.id, email: user.email, role: user.role, iss: "rald.cloud" },
     c.env.RALD_JWT_SECRET
   );
-  void db.from("auth_sessions").insert({
-    user_id: user.id,
-    created_at: new Date().toISOString(),
-    expires_at: new Date(Date.now() + 86400 * 1000).toISOString(),
-  });
+  try {
+    await db.from("auth_sessions").insert({
+      user_id:    user.id,
+      expires_at: new Date(Date.now() + 86400 * 1000).toISOString(),
+    });
+  } catch (e) {
+    console.error("[rald-auth] session insert failed:", String(e));
+  }
 
   return c.json({ token, user: userShape(user) });
 });
