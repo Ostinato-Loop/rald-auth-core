@@ -12,7 +12,7 @@ devices.get("/", authMiddleware, async (c) => {
   const db = c.get("db");
   try {
     const { data } = await db
-      .from("user_devices")
+      .from("auth_devices")
       .select("id,device_name,device_type,os,browser,ip_address,last_seen_at,is_trusted,created_at")
       .eq("user_id", user.id)
       .order("last_seen_at", { ascending: false });
@@ -27,7 +27,7 @@ devices.post("/:id/trust", authMiddleware, async (c) => {
   const db = c.get("db");
   try {
     await db
-      .from("user_devices")
+      .from("auth_devices")
       .update({ is_trusted: true })
       .eq("id", c.req.param("id"))
       .eq("user_id", user.id);
@@ -42,7 +42,7 @@ devices.delete("/:id", authMiddleware, async (c) => {
   const db = c.get("db");
   try {
     await db
-      .from("user_devices")
+      .from("auth_devices")
       .delete()
       .eq("id", c.req.param("id"))
       .eq("user_id", user.id);

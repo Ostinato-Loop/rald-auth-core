@@ -47,7 +47,7 @@ auth.post("/login", async (c) => {
 
   const db = c.get("db");
   const { data: users } = await db
-    .from("users")
+    .from("auth_users")
     .select("id,email,name,role,password_hash,created_at")
     .eq("email", body.email.trim().toLowerCase())
     .limit(1);
@@ -60,7 +60,7 @@ auth.post("/login", async (c) => {
     { id: user.id, email: user.email, role: user.role, iss: "rald.cloud" },
     c.env.RALD_JWT_SECRET
   );
-  void db.from("sessions").insert({
+  void db.from("auth_sessions").insert({
     user_id: user.id,
     created_at: new Date().toISOString(),
     expires_at: new Date(Date.now() + 86400 * 1000).toISOString(),
@@ -92,7 +92,7 @@ auth.post("/register", async (c) => {
     return c.json({ error: "Invalid email address" }, 400);
 
   const db = c.get("db");
-  const { data: existing } = await db.from("users").select("id").eq("email", email).limit(1);
+  const { data: existing } = await db.from("auth_users").select("id").eq("email", email).limit(1);
   if (existing?.length) return c.json({ error: "An account with this email already exists" }, 409);
 
   const password_hash = await hashPassword(body.password);
@@ -104,7 +104,7 @@ auth.post("/register", async (c) => {
   if (Object.keys(meta).length) insertData.metadata = meta;
 
   const { data: newUsers, error } = await db
-    .from("users")
+    .from("auth_users")
     .insert(insertData)
     .select("id,email,name,role,created_at")
     .limit(1);
@@ -181,7 +181,7 @@ auth.post("/verify-otp", async (c) => {
   let existingUser: UserRow | undefined;
   try {
     const { data } = await db
-      .from("users")
+      .from("auth_users")
       .select("id,email,name,role,created_at")
       .filter("metadata->>phone", "eq", phone)
       .limit(1);
@@ -231,14 +231,14 @@ auth.post("/register-from-otp", async (c) => {
     return c.json({ error: "Invalid email address" }, 400);
 
   const db = c.get("db");
-  const { data: existing } = await db.from("users").select("id").eq("email", email).limit(1);
+  const { data: existing } = await db.from("auth_users").select("id").eq("email", email).limit(1);
   if (existing?.length) return c.json({ error: "An account with this email already exists" }, 409);
 
   const meta: Record<string, string> = { phone };
   if (role === "merchant" && body.businessName) meta.business_name = body.businessName.trim();
 
   const { data: newUsers, error } = await db
-    .from("users")
+    .from("auth_users")
     .insert({ email, name, role, password_hash: "", metadata: meta })
     .select("id,email,name,role,created_at")
     .limit(1);
@@ -311,7 +311,7 @@ auth.post("/verify-login-email-otp", async (c) => {
 
   const db = c.get("db");
   const { data: users } = await db
-    .from("users")
+    .from("auth_users")
     .select("id,email,name,role,created_at")
     .eq("email", email)
     .limit(1);
@@ -341,7 +341,7 @@ auth.post("/request-password-reset", async (c) => {
 
   const email = body.email.trim().toLowerCase();
   const db = c.get("db");
-  const { data: users } = await db.from("users").select("id").eq("email", email).limit(1);
+  const { data: users } = await db.from("auth_users").select("id").eq("email", email).limit(1);
 
   const okMsg = { message: "If an account exists with this email, a reset code has been sent." };
   if (!users?.length) return c.json(okMsg);
@@ -350,7 +350,7 @@ auth.post("/request-password-reset", async (c) => {
   const codeHash = await hashOtpCode(code);
 
   try {
-    await db.from("otps").insert({
+    await db.from("auth_otp_codes").insert({
       email,
       code_hash: codeHash,
       type: "password_reset",
@@ -386,7 +386,7 @@ auth.post("/reset-password", async (c) => {
   let otp: { id: string; code_hash: string } | undefined;
   try {
     const { data: otps } = await db
-      .from("otps")
+      .from("auth_otp_codes")
       .select("id,code_hash")
       .eq("email", email)
       .eq("type", "password_reset")
@@ -403,9 +403,9 @@ auth.post("/reset-password", async (c) => {
   if (!(await verifyOtpCode(body.code, otp.code_hash)))
     return c.json({ error: "Incorrect reset code." }, 401);
 
-  await db.from("otps").update({ used: true }).eq("id", otp.id);
+  await db.from("auth_otp_codes").update({ used: true }).eq("id", otp.id);
   const password_hash = await hashPassword(body.newPassword);
-  await db.from("users").update({ password_hash }).eq("email", email);
+  await db.from("auth_users").update({ password_hash }).eq("email", email);
 
   return c.json({ message: "Password updated. You can now sign in." });
 });
@@ -416,7 +416,7 @@ auth.get("/me", authMiddleware, async (c) => {
   const user = c.get("user")!;
   const db = c.get("db");
   const { data: users } = await db
-    .from("users")
+    .from("auth_users")
     .select("id,email,name,role,metadata,created_at")
     .eq("id", user.id)
     .limit(1);
@@ -440,7 +440,7 @@ auth.get("/sessions", authMiddleware, async (c) => {
   const db = c.get("db");
   try {
     const { data } = await db
-      .from("sessions")
+      .from("auth_sessions")
       .select("id,user_agent,ip_address,last_seen_at,created_at")
       .eq("user_id", user.id)
       .is("revoked_at", null)
@@ -457,7 +457,7 @@ auth.delete("/sessions/:id", authMiddleware, async (c) => {
   const db = c.get("db");
   try {
     await db
-      .from("sessions")
+      .from("auth_sessions")
       .update({ revoked_at: new Date().toISOString() })
       .eq("id", c.req.param("id"))
       .eq("user_id", user.id);
@@ -470,7 +470,7 @@ auth.delete("/sessions", authMiddleware, async (c) => {
   const db = c.get("db");
   try {
     await db
-      .from("sessions")
+      .from("auth_sessions")
       .update({ revoked_at: new Date().toISOString() })
       .eq("user_id", user.id)
       .is("revoked_at", null);
