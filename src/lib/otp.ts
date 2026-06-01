@@ -5,7 +5,11 @@
 
 // ── SMS OTP (Termii) ─────────────────────────────────────────────────────────
 
-export async function sendSmsOtp(phone: string, apiKey: string): Promise<{ pinId: string }> {
+export async function sendSmsOtp(
+  phone: string,
+  apiKey: string,
+  senderId = "N-Alert"
+): Promise<{ pinId: string }> {
   const res = await fetch("https://api.ng.termii.com/api/sms/otp/send", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -13,7 +17,7 @@ export async function sendSmsOtp(phone: string, apiKey: string): Promise<{ pinId
       api_key: apiKey,
       message_type: "NUMERIC",
       to: phone,
-      from: "RALD",
+      from: senderId,
       channel: "dnd",
       pin_attempts: 3,
       pin_time_to_live: 10,

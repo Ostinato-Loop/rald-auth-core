@@ -60,7 +60,6 @@ auth.post("/login", async (c) => {
     { id: user.id, email: user.email, role: user.role, iss: "rald.cloud" },
     c.env.RALD_JWT_SECRET
   );
-  // Write session record (fire-and-forget — strict TS safe)
   void db.from("sessions").insert({
     user_id: user.id,
     created_at: new Date().toISOString(),
@@ -141,7 +140,9 @@ auth.post("/send-otp", async (c) => {
   }
 
   try {
-    const { pinId } = await sendSmsOtp(phone, c.env.TERMII_API_KEY);
+    // Use configured TERMII_SENDER_ID — falls back to "N-Alert" (DND-compatible generic sender)
+    const senderId = c.env.TERMII_SENDER_ID || "N-Alert";
+    const { pinId } = await sendSmsOtp(phone, c.env.TERMII_API_KEY, senderId);
     return c.json({ pinId, message: "Verification code sent" });
   } catch (err: unknown) {
     console.error("SMS OTP error:", err);
