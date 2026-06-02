@@ -1,11 +1,13 @@
 // RALD Auth Core — Cloudflare Worker
-// Deployed at: auth.rald.cloud | Version: 1.3.0
+// Deployed at: auth.rald.cloud | Version: 1.4.0
+// G.9 Remediation: Added RATE_LIMIT_KV binding for per-endpoint rate limiting
 // LILCKY STUDIO LIMITED
 
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { JwtPayload } from "./lib/auth";
+import type { KVNamespace } from "./lib/rate-limit";
 import authRoutes      from "./routes/auth";
 import devicesRoutes   from "./routes/devices";
 import ssoRoutes       from "./routes/sso";
@@ -22,6 +24,7 @@ export type Bindings = {
   CLERK_SECRET_KEY: string;
   CLERK_PUBLISHABLE_KEY: string;
   ENVIRONMENT: string;
+  RATE_LIMIT_KV: KVNamespace;
 };
 
 export type Variables = {
@@ -29,7 +32,7 @@ export type Variables = {
   user?: JwtPayload;
 };
 
-const VERSION = "1.3.0";
+const VERSION = "1.4.0";
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -74,11 +77,12 @@ app.get("/ready", (c) =>
   c.json({
     ready: !!(c.env.SUPABASE_URL && c.env.RALD_JWT_SECRET && c.env.RESEND_API_KEY),
     checks: {
-      supabase:   !!c.env.SUPABASE_URL && !!c.env.SUPABASE_SERVICE_ROLE_KEY,
-      jwt:        !!c.env.RALD_JWT_SECRET,
-      termii:     !!c.env.TERMII_API_KEY,
-      resend:     !!c.env.RESEND_API_KEY,
-      clerk:      !!c.env.CLERK_SECRET_KEY && !!c.env.CLERK_PUBLISHABLE_KEY,
+      supabase:      !!c.env.SUPABASE_URL && !!c.env.SUPABASE_SERVICE_ROLE_KEY,
+      jwt:           !!c.env.RALD_JWT_SECRET,
+      termii:        !!c.env.TERMII_API_KEY,
+      resend:        !!c.env.RESEND_API_KEY,
+      clerk:         !!c.env.CLERK_SECRET_KEY && !!c.env.CLERK_PUBLISHABLE_KEY,
+      rate_limiting: !!(c.env.RATE_LIMIT_KV),
     },
     ...serviceInfo(c),
   })
@@ -91,20 +95,20 @@ app.get("/system/status", (c) =>
     version:     VERSION,
     environment: c.env.ENVIRONMENT ?? "production",
     secrets: {
-      supabase:   !!c.env.SUPABASE_URL && !!c.env.SUPABASE_SERVICE_ROLE_KEY,
-      jwt:        !!c.env.RALD_JWT_SECRET,
-      termii:     !!c.env.TERMII_API_KEY,
-      resend:     !!c.env.RESEND_API_KEY,
-      clerk_full: !!c.env.CLERK_SECRET_KEY && !!c.env.CLERK_PUBLISHABLE_KEY,
+      supabase:      !!c.env.SUPABASE_URL && !!c.env.SUPABASE_SERVICE_ROLE_KEY,
+      jwt:           !!c.env.RALD_JWT_SECRET,
+      termii:        !!c.env.TERMII_API_KEY,
+      resend:        !!c.env.RESEND_API_KEY,
+      clerk_full:    !!c.env.CLERK_SECRET_KEY && !!c.env.CLERK_PUBLISHABLE_KEY,
+      rate_limiting: !!(c.env.RATE_LIMIT_KV),
     },
-    timestamp:   new Date().toISOString(),
+    timestamp: new Date().toISOString(),
   })
 );
 
 // ── System Dependencies (live ping) ──────────────────────────────────────────
 app.get("/system/dependencies", async (c) => {
   const checks = await Promise.allSettled([
-    // Supabase: lightweight REST ping
     (async () => {
       const t0 = Date.now();
       const r  = await fetch(`${c.env.SUPABASE_URL}/rest/v1/`, {
@@ -113,7 +117,6 @@ app.get("/system/dependencies", async (c) => {
       });
       return { name: "supabase", ok: r.ok, latency: Date.now() - t0, note: "auth_users table namespace" };
     })(),
-    // Termii: balance check
     (async () => {
       const t0 = Date.now();
       const r  = await fetch(
@@ -123,7 +126,6 @@ app.get("/system/dependencies", async (c) => {
       const d  = await r.json() as { balance?: number; currency?: string };
       return { name: "termii", ok: r.ok, latency: Date.now() - t0, balance: d.balance, currency: d.currency };
     })(),
-    // Resend: domain list
     (async () => {
       const t0 = Date.now();
       const r  = await fetch("https://api.resend.com/domains", {
