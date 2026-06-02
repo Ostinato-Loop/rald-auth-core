@@ -1,5 +1,6 @@
 // RALD Auth Core — Auth Routes
 // Password, SMS OTP, Email OTP, Sessions, Password Reset
+// G.9 Remediation: Rate limiting + audit logging on all auth endpoints
 // LILCKY STUDIO LIMITED
 
 import { Hono } from "hono";
@@ -16,6 +17,13 @@ import {
   hashOtpCode,
   verifyOtpCode,
 } from "../lib/otp";
+import {
+  checkRateLimit,
+  RATE_LIMITS,
+  getClientIp,
+  rateLimitResponse,
+} from "../lib/rate-limit";
+import { writeAuditLog } from "../lib/audit";
 
 const auth = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -38,6 +46,9 @@ const userShape = (u: UserRow) => ({
 // ── Password Auth ─────────────────────────────────────────────────────────────
 
 auth.post("/login", async (c) => {
+  const ip = getClientIp(c.req.raw);
+  const db = c.get("db");
+
   const body = (await c.req.json().catch(() => null)) as {
     email?: string;
     password?: string;
@@ -45,16 +56,34 @@ auth.post("/login", async (c) => {
   if (!body?.email || !body?.password)
     return c.json({ error: "Email and password required" }, 400);
 
-  const db = c.get("db");
+  const email = body.email.trim().toLowerCase();
+
+  // ── Rate limiting: IP + email ───────────────────────────────────────────────
+  const kv = (c.env as unknown as Record<string, unknown>).RATE_LIMIT_KV as Parameters<typeof checkRateLimit>[0];
+
+  const ipCheck = await checkRateLimit(kv, RATE_LIMITS.loginIp(ip));
+  if (!ipCheck.allowed) {
+    await writeAuditLog(db, { action: "rate_limited", ip, status: "blocked", metadata: { reason: "login_ip", email } });
+    return rateLimitResponse(ipCheck.resetAt);
+  }
+
+  const emailCheck = await checkRateLimit(kv, RATE_LIMITS.loginEmail(email));
+  if (!emailCheck.allowed) {
+    await writeAuditLog(db, { action: "rate_limited", ip, status: "blocked", metadata: { reason: "login_email", email } });
+    return rateLimitResponse(emailCheck.resetAt);
+  }
+
   const { data: users } = await db
     .from("auth_users")
     .select("id,email,name,role,password_hash,created_at")
-    .eq("email", body.email.trim().toLowerCase())
+    .eq("email", email)
     .limit(1);
 
   const user = users?.[0];
-  if (!user || !user.password_hash || !(await verifyPassword(body.password, user.password_hash)))
+  if (!user || !user.password_hash || !(await verifyPassword(body.password, user.password_hash))) {
+    await writeAuditLog(db, { action: "login_failed", ip, status: "failure", metadata: { email } });
     return c.json({ error: "Invalid email or password" }, 401);
+  }
 
   const token = await signJwt(
     { id: user.id, email: user.email, role: user.role, iss: "rald.cloud" },
@@ -69,10 +98,14 @@ auth.post("/login", async (c) => {
     console.error("[rald-auth] session insert failed:", String(e));
   }
 
+  await writeAuditLog(db, { userId: user.id, action: "login", ip, status: "success", metadata: { email } });
   return c.json({ token, user: userShape(user) });
 });
 
 auth.post("/register", async (c) => {
+  const ip = getClientIp(c.req.raw);
+  const db = c.get("db");
+
   const body = (await c.req.json().catch(() => null)) as {
     email?: string;
     password?: string;
@@ -85,6 +118,14 @@ auth.post("/register", async (c) => {
   if (!body?.email || !body?.password || !body?.name)
     return c.json({ error: "Name, email, and password are required" }, 400);
 
+  // ── Rate limiting: IP ───────────────────────────────────────────────────────
+  const kv = (c.env as unknown as Record<string, unknown>).RATE_LIMIT_KV as Parameters<typeof checkRateLimit>[0];
+  const ipCheck = await checkRateLimit(kv, RATE_LIMITS.registerIp(ip));
+  if (!ipCheck.allowed) {
+    await writeAuditLog(db, { action: "rate_limited", ip, status: "blocked", metadata: { reason: "register_ip" } });
+    return rateLimitResponse(ipCheck.resetAt);
+  }
+
   const email = body.email.trim().toLowerCase();
   const name = body.name.trim();
   const role = body.role === "merchant" ? "merchant" : "user";
@@ -94,7 +135,6 @@ auth.post("/register", async (c) => {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
     return c.json({ error: "Invalid email address" }, 400);
 
-  const db = c.get("db");
   const { data: existing } = await db.from("auth_users").select("id").eq("email", email).limit(1);
   if (existing?.length) return c.json({ error: "An account with this email already exists" }, 409);
 
@@ -125,30 +165,58 @@ auth.post("/register", async (c) => {
   if (c.env.RESEND_API_KEY)
     sendWelcomeEmail(newUser.email, newUser.name ?? name, c.env.RESEND_API_KEY).catch(console.error);
 
+  await writeAuditLog(db, { userId: newUser.id, action: "register", ip, status: "success", metadata: { email, role } });
   return c.json({ token, user: userShape(newUser) }, 201);
 });
 
 // ── SMS OTP Auth ──────────────────────────────────────────────────────────────
 
 auth.post("/send-otp", async (c) => {
+  const ip = getClientIp(c.req.raw);
+  const db = c.get("db");
+
   const body = (await c.req.json().catch(() => null)) as { phone?: string } | null;
   if (!body?.phone) return c.json({ error: "Phone number required" }, 400);
 
   const phone = body.phone.replace(/\D/g, "");
   if (phone.length < 10) return c.json({ error: "Invalid phone number" }, 400);
 
-  if (!c.env.TERMII_API_KEY) {
+  // ── Rate limiting: per-phone + per-IP ──────────────────────────────────────
+  const kv = (c.env as unknown as Record<string, unknown>).RATE_LIMIT_KV as Parameters<typeof checkRateLimit>[0];
+
+  const phoneCheck = await checkRateLimit(kv, RATE_LIMITS.otpSendPhone(phone));
+  if (!phoneCheck.allowed) {
+    await writeAuditLog(db, { action: "rate_limited", ip, status: "blocked", metadata: { reason: "otp_phone", phone } });
+    return rateLimitResponse(phoneCheck.resetAt);
+  }
+
+  const ipCheck = await checkRateLimit(kv, RATE_LIMITS.otpSendIp(ip));
+  if (!ipCheck.allowed) {
+    await writeAuditLog(db, { action: "rate_limited", ip, status: "blocked", metadata: { reason: "otp_ip" } });
+    return rateLimitResponse(ipCheck.resetAt);
+  }
+
+  // ── Dev mode: only when ENVIRONMENT is not production AND no real key ───────
+  const isProduction = c.env.ENVIRONMENT === "production";
+  if (!c.env.TERMII_API_KEY && !isProduction) {
     console.log(`[DEV] SMS OTP for ${phone}: 123456`);
+    await writeAuditLog(db, { action: "otp_sent", ip, status: "success", metadata: { phone, channel: "dev" } });
     return c.json({ pinId: "dev-mode-pin-id", message: "Verification code sent" });
   }
 
+  if (!c.env.TERMII_API_KEY) {
+    console.error("[rald-auth] TERMII_API_KEY not configured in production");
+    return c.json({ error: "Verification service not available. Please try again later." }, 503);
+  }
+
   try {
-    // Use configured TERMII_SENDER_ID — falls back to "N-Alert" (DND-compatible generic sender)
     const senderId = c.env.TERMII_SENDER_ID || "N-Alert";
     const { pinId } = await sendSmsOtp(phone, c.env.TERMII_API_KEY, senderId);
+    await writeAuditLog(db, { action: "otp_sent", ip, status: "success", metadata: { phone, channel: "termii" } });
     return c.json({ pinId, message: "Verification code sent" });
   } catch (err: unknown) {
     console.error("SMS OTP error:", err);
+    await writeAuditLog(db, { action: "otp_sent", ip, status: "failure", metadata: { phone, error: String(err) } });
     return c.json(
       { error: err instanceof Error ? err.message : "Failed to send code. Try again." },
       502
@@ -157,6 +225,9 @@ auth.post("/send-otp", async (c) => {
 });
 
 auth.post("/verify-otp", async (c) => {
+  const ip = getClientIp(c.req.raw);
+  const db = c.get("db");
+
   const body = (await c.req.json().catch(() => null)) as {
     pinId?: string;
     pin?: string;
@@ -166,20 +237,26 @@ auth.post("/verify-otp", async (c) => {
     return c.json({ error: "pinId, pin, and phone are required" }, 400);
 
   let verified = false;
-  if (!c.env.TERMII_API_KEY || body.pinId === "dev-mode-pin-id") {
+  const isProduction = c.env.ENVIRONMENT === "production";
+
+  if (!c.env.TERMII_API_KEY && !isProduction || body.pinId === "dev-mode-pin-id") {
     verified = body.pin === "123456";
-  } else {
+  } else if (c.env.TERMII_API_KEY) {
     try {
       verified = await verifySmsOtp(body.pinId, body.pin, c.env.TERMII_API_KEY);
     } catch (err) {
       console.error("SMS verify error:", err);
       return c.json({ error: "Verification error. Try again." }, 502);
     }
+  } else {
+    return c.json({ error: "Verification service not available." }, 503);
   }
 
-  if (!verified) return c.json({ error: "Invalid or expired code. Try again." }, 401);
+  if (!verified) {
+    await writeAuditLog(db, { action: "otp_failed", ip, status: "failure", metadata: { phone: body.phone } });
+    return c.json({ error: "Invalid or expired code. Try again." }, 401);
+  }
 
-  const db = c.get("db");
   const phone = body.phone.replace(/\D/g, "");
   let existingUser: UserRow | undefined;
   try {
@@ -196,6 +273,7 @@ auth.post("/verify-otp", async (c) => {
       { id: existingUser.id, email: existingUser.email, role: existingUser.role },
       c.env.RALD_JWT_SECRET
     );
+    await writeAuditLog(db, { userId: existingUser.id, action: "otp_verified", ip, status: "success", metadata: { phone } });
     return c.json({ token, user: userShape(existingUser) });
   }
 
@@ -204,10 +282,14 @@ auth.post("/verify-otp", async (c) => {
     c.env.RALD_JWT_SECRET,
     300
   );
+  await writeAuditLog(db, { action: "otp_verified", ip, status: "success", metadata: { phone, newUser: true } });
   return c.json({ newUser: true, phone, otpToken });
 });
 
 auth.post("/register-from-otp", async (c) => {
+  const ip = getClientIp(c.req.raw);
+  const db = c.get("db");
+
   const body = (await c.req.json().catch(() => null)) as {
     otpToken?: string;
     name?: string;
@@ -233,7 +315,6 @@ auth.post("/register-from-otp", async (c) => {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
     return c.json({ error: "Invalid email address" }, 400);
 
-  const db = c.get("db");
   const { data: existing } = await db.from("auth_users").select("id").eq("email", email).limit(1);
   if (existing?.length) return c.json({ error: "An account with this email already exists" }, 409);
 
@@ -259,18 +340,30 @@ auth.post("/register-from-otp", async (c) => {
   if (c.env.RESEND_API_KEY)
     sendWelcomeEmail(newUser.email, newUser.name ?? name, c.env.RESEND_API_KEY).catch(console.error);
 
+  await writeAuditLog(db, { userId: newUser.id, action: "register", ip, status: "success", metadata: { email, role, via: "otp" } });
   return c.json({ token, user: userShape(newUser) }, 201);
 });
 
 // ── Email OTP Auth ────────────────────────────────────────────────────────────
 
 auth.post("/send-login-email-otp", async (c) => {
+  const ip = getClientIp(c.req.raw);
+  const db = c.get("db");
+
   const body = (await c.req.json().catch(() => null)) as { email?: string } | null;
   if (!body?.email) return c.json({ error: "Email required" }, 400);
 
   const email = body.email.trim().toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
     return c.json({ error: "Invalid email address" }, 400);
+
+  // ── Rate limiting: per-email ────────────────────────────────────────────────
+  const kv = (c.env as unknown as Record<string, unknown>).RATE_LIMIT_KV as Parameters<typeof checkRateLimit>[0];
+  const emailCheck = await checkRateLimit(kv, RATE_LIMITS.otpSendEmail(email));
+  if (!emailCheck.allowed) {
+    await writeAuditLog(db, { action: "rate_limited", ip, status: "blocked", metadata: { reason: "otp_email", email } });
+    return rateLimitResponse(emailCheck.resetAt);
+  }
 
   const code = generateNumericOtp(6);
   const codeHash = await hashOtpCode(code);
@@ -282,19 +375,25 @@ auth.post("/send-login-email-otp", async (c) => {
 
   if (!c.env.RESEND_API_KEY) {
     console.log(`[DEV] Email login OTP for ${email}: ${code}`);
+    await writeAuditLog(db, { action: "otp_sent", ip, status: "success", metadata: { email, channel: "dev" } });
     return c.json({ sessionToken, message: "Verification code sent to your email" });
   }
 
   try {
     await sendLoginEmailOtp(email, code, c.env.RESEND_API_KEY);
+    await writeAuditLog(db, { action: "otp_sent", ip, status: "success", metadata: { email, channel: "resend" } });
     return c.json({ sessionToken, message: "Verification code sent to your email" });
   } catch (err: unknown) {
     console.error("Login email OTP error:", err);
+    await writeAuditLog(db, { action: "otp_sent", ip, status: "failure", metadata: { email, error: String(err) } });
     return c.json({ error: "Failed to send verification email. Try again." }, 502);
   }
 });
 
 auth.post("/verify-login-email-otp", async (c) => {
+  const ip = getClientIp(c.req.raw);
+  const db = c.get("db");
+
   const body = (await c.req.json().catch(() => null)) as {
     sessionToken?: string;
     code?: string;
@@ -310,9 +409,11 @@ auth.post("/verify-login-email-otp", async (c) => {
   if (!email || !codeHash) return c.json({ error: "Invalid session data" }, 400);
 
   const inputHash = await hashOtpCode(body.code.trim());
-  if (inputHash !== codeHash) return c.json({ error: "Invalid or expired code. Try again." }, 401);
+  if (inputHash !== codeHash) {
+    await writeAuditLog(db, { action: "otp_failed", ip, status: "failure", metadata: { email } });
+    return c.json({ error: "Invalid or expired code. Try again." }, 401);
+  }
 
-  const db = c.get("db");
   const { data: users } = await db
     .from("auth_users")
     .select("id,email,name,role,created_at")
@@ -325,6 +426,7 @@ auth.post("/verify-login-email-otp", async (c) => {
       { id: existingUser.id, email: existingUser.email, role: existingUser.role },
       c.env.RALD_JWT_SECRET
     );
+    await writeAuditLog(db, { userId: existingUser.id, action: "otp_verified", ip, status: "success", metadata: { email } });
     return c.json({ token, user: userShape(existingUser) });
   }
 
@@ -333,19 +435,30 @@ auth.post("/verify-login-email-otp", async (c) => {
     c.env.RALD_JWT_SECRET,
     300
   );
+  await writeAuditLog(db, { action: "otp_verified", ip, status: "success", metadata: { email, newUser: true } });
   return c.json({ newUser: true, email, emailToken });
 });
 
 // ── Password Reset ────────────────────────────────────────────────────────────
 
 auth.post("/request-password-reset", async (c) => {
+  const ip = getClientIp(c.req.raw);
+  const db = c.get("db");
+
   const body = (await c.req.json().catch(() => null)) as { email?: string } | null;
   if (!body?.email) return c.json({ error: "Email required" }, 400);
 
   const email = body.email.trim().toLowerCase();
-  const db = c.get("db");
-  const { data: users } = await db.from("auth_users").select("id").eq("email", email).limit(1);
 
+  // ── Rate limiting: per-email ────────────────────────────────────────────────
+  const kv = (c.env as unknown as Record<string, unknown>).RATE_LIMIT_KV as Parameters<typeof checkRateLimit>[0];
+  const rl = await checkRateLimit(kv, RATE_LIMITS.passwordReset(email));
+  if (!rl.allowed) {
+    await writeAuditLog(db, { action: "rate_limited", ip, status: "blocked", metadata: { reason: "password_reset", email } });
+    return rateLimitResponse(rl.resetAt);
+  }
+
+  const { data: users } = await db.from("auth_users").select("id").eq("email", email).limit(1);
   const okMsg = { message: "If an account exists with this email, a reset code has been sent." };
   if (!users?.length) return c.json(okMsg);
 
@@ -369,10 +482,14 @@ auth.post("/request-password-reset", async (c) => {
     );
   else console.log(`[DEV] Password reset for ${email}: ${code}`);
 
+  await writeAuditLog(db, { action: "password_reset_requested", ip, status: "success", metadata: { email } });
   return c.json(okMsg);
 });
 
 auth.post("/reset-password", async (c) => {
+  const ip = getClientIp(c.req.raw);
+  const db = c.get("db");
+
   const body = (await c.req.json().catch(() => null)) as {
     email?: string;
     code?: string;
@@ -384,7 +501,6 @@ auth.post("/reset-password", async (c) => {
     return c.json({ error: "Password must be at least 8 characters" }, 400);
 
   const email = body.email.trim().toLowerCase();
-  const db = c.get("db");
 
   let otp: { id: string; code_hash: string } | undefined;
   try {
@@ -410,6 +526,7 @@ auth.post("/reset-password", async (c) => {
   const password_hash = await hashPassword(body.newPassword);
   await db.from("auth_users").update({ password_hash }).eq("email", email);
 
+  await writeAuditLog(db, { action: "password_reset_completed", ip, status: "success", metadata: { email } });
   return c.json({ message: "Password updated. You can now sign in." });
 });
 
@@ -458,6 +575,7 @@ auth.get("/sessions", authMiddleware, async (c) => {
 auth.delete("/sessions/:id", authMiddleware, async (c) => {
   const user = c.get("user")!;
   const db = c.get("db");
+  const ip = getClientIp(c.req.raw);
   try {
     await db
       .from("auth_sessions")
@@ -465,12 +583,14 @@ auth.delete("/sessions/:id", authMiddleware, async (c) => {
       .eq("id", c.req.param("id"))
       .eq("user_id", user.id);
   } catch {}
+  await writeAuditLog(db, { userId: user.id, action: "session_revoked", ip, status: "success" });
   return c.json({ message: "Session revoked" });
 });
 
 auth.delete("/sessions", authMiddleware, async (c) => {
   const user = c.get("user")!;
   const db = c.get("db");
+  const ip = getClientIp(c.req.raw);
   try {
     await db
       .from("auth_sessions")
@@ -478,6 +598,7 @@ auth.delete("/sessions", authMiddleware, async (c) => {
       .eq("user_id", user.id)
       .is("revoked_at", null);
   } catch {}
+  await writeAuditLog(db, { userId: user.id, action: "all_sessions_revoked", ip, status: "success" });
   return c.json({ message: "All sessions revoked" });
 });
 
