@@ -19,6 +19,14 @@ ENVIRONMENT = "production"
 pattern = "auth.rald.cloud/*"
 zone_name = "rald.cloud"
 
+# ── KV Namespaces ─────────────────────────────────────────────────────────────
+# Rate limiting store. Create with:
+#   wrangler kv namespace create rald-auth-rate-limit
+# Then replace the id below with the generated namespace ID.
+[[kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
 [build]
 command = ""
 
