@@ -1,6 +1,7 @@
 // RALD Auth Core — Universal App Provisioning Service
 // Phase: RALD Identity Platform V2
 // Rule: Authenticated users are NEVER redirected to onboarding — apps are provisioned silently.
+// Fix: PostgrestFilterBuilder is PromiseLike — use Promise.resolve().then(undefined, fn) not .catch()
 // LILCKY STUDIO LIMITED
 
 import { Hono } from "hono";
@@ -50,42 +51,40 @@ provision.post("/app", authMiddleware, async (c) => {
   }
 
   // 2. Ensure auth_user_profiles row exists (creates default preferences)
-  await db.from("auth_user_profiles").upsert(
-    {
-      user_id:          user.id,
-      updated_at:       now,
-      provisioned_apps: db.rpc("array_append_unique", { arr: [], val: body.app_id }) as unknown as string[],
-    },
-    { onConflict: "user_id" }
-  ).then(() => {
-    // Append app_id to provisioned_apps array
-    return db.rpc("provision_app_append", {
+  await Promise.resolve(
+    db.from("auth_user_profiles").upsert(
+      { user_id: user.id, updated_at: now },
+      { onConflict: "user_id" }
+    )
+  ).then(undefined, () => null);
+
+  // 3. Append app_id to provisioned_apps array via stored procedure (graceful)
+  await Promise.resolve(
+    db.rpc("provision_app_append", {
       p_user_id: user.id,
       p_app_id:  body.app_id,
-    }).catch(() => null); // graceful — array function may not exist yet
-  }).catch(() => null);
+    })
+  ).then(undefined, () => null);
 
-  // 3. Non-blocking: link to CRM if app has customer context
+  // 4. Non-blocking: write login history + audit
   const appMeta = ECOSYSTEM_APPS.find(a => a.id === body.app_id as EcosystemAppId);
-  c.executionCtx.waitUntil((async () => {
-    // Write login history
-    await db.from("auth_login_history").insert({
+  void Promise.resolve(
+    db.from("auth_login_history").insert({
       user_id:    user.id,
       app_id:     body.app_id,
       ip_address: ip,
       success:    true,
       created_at: now,
-    }).catch(() => null);
+    })
+  ).then(undefined, () => null);
 
-    // Audit log
-    await writeAuditLog(db, {
-      userId: user.id,
-      action: "app_provisioned",
-      ip,
-      status: "success",
-      metadata: { app_id: body.app_id, workspace_id: body.workspace_id ?? null },
-    });
-  })());
+  await writeAuditLog(db, {
+    userId: user.id,
+    action: "app_provisioned",
+    ip,
+    status: "success",
+    metadata: { app_id: body.app_id, workspace_id: body.workspace_id ?? null },
+  });
 
   return c.json({
     ok:           true,
@@ -120,10 +119,10 @@ provision.get("/status", authMiddleware, async (c) => {
   }));
 
   return c.json({
-    user_id:          user.id,
-    apps:             status,
+    user_id:           user.id,
+    apps:              status,
     provisioned_count: status.filter(a => a.provisioned).length,
-    total_apps:       status.length,
+    total_apps:        status.length,
   });
 });
 
