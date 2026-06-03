@@ -1,7 +1,7 @@
 // RALD Auth Core — Cloudflare Worker
-// Deployed at: auth.rald.cloud | Version: 2.0.0
-// Phase: RALD Identity Platform V2 — Universal SSO, profiles.rald.cloud canonical hub
-// Changelog: Added /profiles route, Universal App Provisioning, redirect validation
+// Deployed at: auth.rald.cloud | Version: 2.1.0
+// Phase G.10: KV Session Authority (rald-session), /session broker, /me shortcut, /logout
+// Changelog v2.1.0: RALD_SESSION_KV binding, session route, expanded audit types
 // LILCKY STUDIO LIMITED
 
 import { Hono } from "hono";
@@ -9,24 +9,27 @@ import { cors } from "hono/cors";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { JwtPayload } from "./lib/auth";
 import type { KVNamespace } from "./lib/rate-limit";
+import type { KvSessionStore } from "./lib/session";
 import authRoutes      from "./routes/auth";
 import devicesRoutes   from "./routes/devices";
 import ssoRoutes       from "./routes/sso";
 import clerkRoutes     from "./routes/clerk";
 import provisionRoutes from "./routes/provision";
 import profilesRoutes  from "./routes/profiles";
+import sessionRoutes   from "./routes/session";
 
 export type Bindings = {
   SUPABASE_URL: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
-  RALD_JWT_SECRET: string;
+  RALD_JWT_SECRET: string;           // Required — 64-char base64url — NO fallback
   TERMII_API_KEY: string;
   TERMII_SENDER_ID: string;
   RESEND_API_KEY: string;
   CLERK_SECRET_KEY: string;
   CLERK_PUBLISHABLE_KEY: string;
   ENVIRONMENT: string;
-  RATE_LIMIT_KV: KVNamespace;
+  RATE_LIMIT_KV: KVNamespace;        // rald-auth-rate-limit namespace
+  RALD_SESSION_KV: KvSessionStore;   // rald-session namespace (Phase G.10)
 };
 
 export type Variables = {
@@ -34,19 +37,19 @@ export type Variables = {
   user?: JwtPayload;
 };
 
-const VERSION = "2.0.0";
+const VERSION = "2.1.0";
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
-// ── CORS — all RALD ecosystem domains ─────────────────────────────────────────
-// profiles.rald.cloud is the canonical identity hub (V2)
-// accounts.rald.cloud is removed — all traffic migrated to profiles.rald.cloud
+// ── CORS — full RALD ecosystem ────────────────────────────────────────────────
+// profiles.rald.cloud is the canonical identity hub
+// accounts.rald.cloud: REMOVED (Phase V2)
 app.use("*", cors({
   origin: [
-    // ── Identity hub (V2 canonical) ─────────────────────────────────────────
+    // ── Identity hub ──────────────────────────────────────────────────────────
     "https://profiles.rald.cloud",
     "https://credentials.rald.cloud",
-    // ── Core platform ────────────────────────────────────────────────────────
+    // ── Core platform ─────────────────────────────────────────────────────────
     "https://rald.cloud",
     "https://auth.rald.cloud",
     "https://admin.rald.cloud",
@@ -65,14 +68,12 @@ app.use("*", cors({
     "https://git.rald.cloud",
     "https://analytics.rald.cloud",
     "https://business.rald.cloud",
-    // ── Alternate / legacy (read-only — kept for migration) ───────────────────
-    "https://identity.rald.cloud",
-    // ── CF Pages (CI previews) ────────────────────────────────────────────────
+    // ── ostloop.name.ng ───────────────────────────────────────────────────────
+    "https://ostloop.name.ng",
+    // ── CF Pages previews ─────────────────────────────────────────────────────
     "https://rald-auth-ui.pages.dev",
     "https://rald-app.pages.dev",
     "https://rald-control-center.pages.dev",
-    // ── ostloop.name.ng domains ───────────────────────────────────────────────
-    "https://ostloop.name.ng",
     // ── Local dev ─────────────────────────────────────────────────────────────
     "http://localhost:5173",
     "http://localhost:3000",
@@ -112,7 +113,8 @@ app.get("/ready", (c) =>
       termii:        !!c.env.TERMII_API_KEY,
       resend:        !!c.env.RESEND_API_KEY,
       clerk:         !!c.env.CLERK_SECRET_KEY && !!c.env.CLERK_PUBLISHABLE_KEY,
-      rate_limiting: !!(c.env.RATE_LIMIT_KV),
+      rate_limit_kv: !!(c.env.RATE_LIMIT_KV),
+      session_kv:    !!(c.env.RALD_SESSION_KV),
     },
     identity_hub: "profiles.rald.cloud",
     ...serviceInfo(c),
@@ -131,7 +133,8 @@ app.get("/system/status", (c) =>
       termii:        !!c.env.TERMII_API_KEY,
       resend:        !!c.env.RESEND_API_KEY,
       clerk_full:    !!c.env.CLERK_SECRET_KEY && !!c.env.CLERK_PUBLISHABLE_KEY,
-      rate_limiting: !!(c.env.RATE_LIMIT_KV),
+      rate_limit_kv: !!(c.env.RATE_LIMIT_KV),
+      session_kv:    !!(c.env.RALD_SESSION_KV),
     },
     timestamp: new Date().toISOString(),
   })
@@ -164,6 +167,13 @@ app.get("/system/dependencies", async (c) => {
       });
       return { name: "resend", ok: r.ok, latency: Date.now() - t0 };
     })(),
+    (async () => {
+      const kv = c.env.RALD_SESSION_KV as unknown as { get: (k: string) => Promise<string | null> } | null;
+      if (!kv) return { name: "session_kv", ok: false, latency: 0, note: "not bound" };
+      const t0 = Date.now();
+      await kv.get("__health__").catch(() => null);
+      return { name: "session_kv", ok: true, latency: Date.now() - t0 };
+    })(),
   ]);
 
   const results = checks.map((c) =>
@@ -182,6 +192,7 @@ app.route("/sso",       ssoRoutes);
 app.route("/sso",       clerkRoutes);
 app.route("/provision", provisionRoutes);
 app.route("/profiles",  profilesRoutes);
+app.route("/",          sessionRoutes);   // GET /session · GET /me · POST /logout etc.
 
 // ── Root ──────────────────────────────────────────────────────────────────────
 app.get("/", (c) => c.json({ docs: "https://auth.rald.cloud/health", ...serviceInfo(c) }));
