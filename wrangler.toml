@@ -8,34 +8,26 @@ ENVIRONMENT  = "production"
 SUPABASE_URL = "https://onxdcikfttdmnhofsuwo.supabase.co"
 
 # Secrets — set via: wrangler secret put <NAME>
-# Required (NONE have fallbacks — all must be set before deployment):
-#   SUPABASE_SERVICE_ROLE_KEY — Supabase service role key
-#   RALD_JWT_SECRET           — 64-char base64url JWT signing secret (NO fallback — required)
-#   TERMII_API_KEY            — SMS OTP (https://termii.com)
-#   TERMII_SENDER_ID          — Registered sender ID (e.g. "RALD")
-#   RESEND_API_KEY            — Email OTP / transactional email (https://resend.com)
-#   CLERK_SECRET_KEY          — Clerk backend API key
-#   CLERK_PUBLISHABLE_KEY     — Clerk publishable key
+# Required (NONE have fallbacks):
+#   SUPABASE_SERVICE_ROLE_KEY  RALD_JWT_SECRET  TERMII_API_KEY
+#   TERMII_SENDER_ID  RESEND_API_KEY  CLERK_SECRET_KEY  CLERK_PUBLISHABLE_KEY
 
 [[routes]]
 pattern = "auth.rald.cloud/*"
 zone_name = "rald.cloud"
 
 # ── KV Namespaces ─────────────────────────────────────────────────────────────
-# Rate limiting store.
-# To create: wrangler kv namespace create rald-auth-rate-limit
-# Then replace the id below with the actual namespace ID from the output.
+# Create: wrangler kv namespace create rald-auth-rate-limit
+# Then replace the id string with the actual namespace ID.
 [[kv_namespaces]]
 binding = "RATE_LIMIT_KV"
-id = "00000000000000000000000000000001"
+id = "REPLACE_WITH_RATE_LIMIT_KV_NAMESPACE_ID"
 
-# Session Authority (Phase G.10) — stores session state for logout-everywhere,
-# device revocation, account suspension, forced signout.
-# To create: wrangler kv namespace create rald-session
-# Then replace the id below with the actual namespace ID from the output.
+# Create: wrangler kv namespace create rald-session
+# Then replace the id string with the actual namespace ID.
 [[kv_namespaces]]
 binding = "RALD_SESSION_KV"
-id = "00000000000000000000000000000002"
+id = "REPLACE_WITH_RALD_SESSION_KV_NAMESPACE_ID"
 
 [build]
 command = ""
