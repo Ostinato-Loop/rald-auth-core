@@ -12,7 +12,8 @@
       "style": {
         "noNonNullAssertion": "warn",
         "useImportType": "off",
-        "useTemplate": "warn"
+        "useTemplate": "warn",
+        "useNumberNamespace": "warn"
       },
       "correctness": {
         "noUnusedVariables": "warn",
