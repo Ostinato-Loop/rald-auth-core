@@ -1,11 +1,12 @@
 // RALD Auth Core — SSO Token Exchange Routes
-// Phase: RALD Identity Platform V2 — Universal SSO
-// Flow: User authenticated once → RALD master token → any app → silent provisioning → enter
+// Phase G.12: Dynamic App Registry — replaces hardcoded TRUSTED_APP_IDS
+// All app validation goes through the registered_apps table.
 // LILCKY STUDIO LIMITED
 
 import { Hono } from "hono";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Bindings, Variables } from "../index";
-import { authMiddleware } from "../lib/middleware";
+import { authMiddleware, adminMiddleware } from "../lib/middleware";
 import { signJwt, verifyJwt } from "../lib/auth";
 import { validateRedirectUrl, safeRedirect, ECOSYSTEM_APPS } from "../lib/redirect";
 import { writeAuditLog } from "../lib/audit";
@@ -14,68 +15,138 @@ import { getClientIp } from "../lib/rate-limit";
 const sso = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 /**
- * TRUSTED_APP_IDS — all apps that may receive SSO tokens.
- * Every RALD ecosystem app must be listed here.
+ * FALLBACK_APP_IDS — emergency fallback only if registered_apps DB is unavailable.
+ * @deprecated — all apps must be registered in the registered_apps table.
+ * Remove this once registered_apps is confirmed stable in production.
  */
-const TRUSTED_APP_IDS = new Set([
-  // ── Core platform ──────────────────────────────────────────────────────────
-  "rald-app",
-  "loop-business",
-  "rald-control-center",
-  "dispatch",
-  "voice",
-  // ── Identity hub (V2) ──────────────────────────────────────────────────────
-  "profiles",
-  "identity",
-  "rald-identity",
-  "loop-identity",
-  "credentials",
-  // ── Ecosystem apps ─────────────────────────────────────────────────────────
-  "loop",
-  "loop-app",
-  "loop-core",
-  "loop-messenger",
-  "messenger",
-  "payrald",
-  "dunarald",
-  "gitrald",
-  "rald-inbox",
-  "raldtics",
-  "raldtics-app",
-  // ── Future / upcoming ──────────────────────────────────────────────────────
-  "gitrald-app",
-  "pay",
-  "duna",
+const FALLBACK_APP_IDS = new Set([
+  // Core platform
+  "rald-app", "loop-business", "rald-control-center", "dispatch", "voice",
+  // Identity hub
+  "profiles", "identity", "rald-identity", "loop-identity", "credentials",
+  // Ecosystem apps
+  "loop", "loop-app", "loop-core", "loop-messenger", "messenger",
+  "payrald", "dunarald", "gitrald", "rald-inbox", "raldtics", "raldtics-app",
+  "gitrald-app", "pay", "duna",
 ]);
 
-// ── GET /sso/apps — list of trusted app IDs ───────────────────────────────────
-sso.get("/apps", (c) =>
-  c.json({
-    apps: [...TRUSTED_APP_IDS],
-    count: TRUSTED_APP_IDS.size,
+/**
+ * Checks whether an appId is registered and active in the ecosystem app registry.
+ * Falls back to the hardcoded set if the DB query fails (prevents auth outage).
+ */
+async function isRegisteredApp(db: SupabaseClient, appId: string): Promise<boolean> {
+  try {
+    const { data, error } = await db
+      .from("registered_apps")
+      .select("app_id")
+      .eq("app_id", appId)
+      .eq("status", "active")
+      .limit(1);
+    if (error) {
+      console.error("[rald-auth] registered_apps lookup error:", error.message, "— using fallback");
+      return FALLBACK_APP_IDS.has(appId);
+    }
+    return !!(data && data.length > 0);
+  } catch (e) {
+    console.error("[rald-auth] registered_apps lookup threw:", String(e), "— using fallback");
+    return FALLBACK_APP_IDS.has(appId);
+  }
+}
+
+// ── GET /sso/apps — list trusted app IDs (DB-driven) ─────────────────────────
+sso.get("/apps", async (c) => {
+  const db = c.get("db");
+  const { data, error } = await db
+    .from("registered_apps")
+    .select("app_id, name, domain, status")
+    .eq("status", "active")
+    .order("name");
+
+  if (error) {
+    console.error("[rald-auth] /sso/apps DB error, using fallback:", error.message);
+    return c.json({
+      apps: [...FALLBACK_APP_IDS],
+      count: FALLBACK_APP_IDS.size,
+      ecosystem: ECOSYSTEM_APPS,
+      identity_hub: "profiles.rald.cloud",
+      source: "fallback",
+      note: "registered_apps table unavailable — using emergency fallback list",
+    });
+  }
+
+  return c.json({
+    apps: (data || []).map((r) => r.app_id),
+    registry: data || [],
+    count: (data || []).length,
     ecosystem: ECOSYSTEM_APPS,
     identity_hub: "profiles.rald.cloud",
-    note: "Only apps in this list may receive SSO tokens from /sso/exchange",
-  })
-);
+    source: "database",
+    note: "Apps are dynamically registered via the ecosystem app registry.",
+  });
+});
+
+// ── GET /sso/registry — full app registry details ────────────────────────────
+sso.get("/registry", async (c) => {
+  const db = c.get("db");
+  const { data, error } = await db
+    .from("registered_apps")
+    .select("app_id, name, domain, callback_url, logout_url, icon, status, created_at")
+    .order("name");
+
+  if (error) return c.json({ error: "Registry unavailable", detail: error.message }, 503);
+  return c.json({ apps: data || [], count: (data || []).length, timestamp: new Date().toISOString() });
+});
+
+// ── POST /sso/registry — register a new app (admin only) ─────────────────────
+sso.post("/registry", adminMiddleware, async (c) => {
+  const db = c.get("db");
+  const body = await c.req.json<{
+    app_id: string;
+    name: string;
+    domain: string;
+    callback_url: string;
+    logout_url?: string;
+    icon?: string;
+  }>().catch(() => null);
+
+  if (!body?.app_id || !body?.name || !body?.domain || !body?.callback_url)
+    return c.json({ error: "app_id, name, domain, callback_url are required" }, 400);
+
+  if (!validateRedirectUrl(body.callback_url))
+    return c.json({ error: "callback_url must be a valid *.rald.cloud or *.ostloop.name.ng URL" }, 400);
+
+  const { data, error } = await db
+    .from("registered_apps")
+    .upsert({ ...body, status: "active", updated_at: new Date().toISOString() }, { onConflict: "app_id" })
+    .select()
+    .limit(1);
+
+  if (error) return c.json({ error: "Registration failed", detail: error.message }, 500);
+
+  const ip = getClientIp(c.req.raw);
+  await writeAuditLog(db, {
+    userId: c.get("user")!.id,
+    action: "app_registered" as Parameters<typeof writeAuditLog>[1]["action"],
+    ip,
+    status: "success",
+    metadata: { app_id: body.app_id, domain: body.domain },
+  });
+
+  return c.json({ registered: data?.[0], message: "App registered in ecosystem registry" }, 201);
+});
 
 // ── POST /sso/exchange — exchange master JWT for an app-scoped token ──────────
-// Body: { appId: string, redirect_to?: string }
-// redirect_to is validated — only *.rald.cloud and *.ostloop.name.ng are accepted.
 sso.post("/exchange", authMiddleware, async (c) => {
   const user = c.get("user")!;
   const db = c.get("db");
   const ip = getClientIp(c.req.raw);
 
-  const body = await c.req.json<{
-    appId?: string;
-    redirect_to?: string;
-  }>().catch(() => null);
+  const body = await c.req.json<{ appId?: string; redirect_to?: string }>().catch(() => null);
   if (!body?.appId) return c.json({ error: "appId required" }, 400);
-  if (!TRUSTED_APP_IDS.has(body.appId))
-    return c.json({ error: "Unknown app", appId: body.appId }, 400);
 
-  // Validate redirect_to — reject anything not in the RALD ecosystem
+  if (!(await isRegisteredApp(db, body.appId)))
+    return c.json({ error: "Unknown app — not registered in the RALD ecosystem", appId: body.appId }, 400);
+
   const redirect_to = safeRedirect(body.redirect_to, undefined);
   if (body.redirect_to && !validateRedirectUrl(body.redirect_to)) {
     return c.json({
@@ -86,45 +157,35 @@ sso.post("/exchange", authMiddleware, async (c) => {
 
   const appToken = await signJwt(
     {
-      id:        user.id,
-      email:     user.email,
-      phone:     (user as unknown as Record<string, unknown>).phone ?? null,
-      role:      user.role,
-      appId:     body.appId,
-      source:    "rald-auth",
-      sso_v:     2,
+      id:    user.id,
+      email: user.email,
+      phone: (user as unknown as Record<string, unknown>).phone ?? null,
+      role:  user.role,
+      appId: body.appId,
+      source: "rald-auth",
+      sso_v: 2,
     },
     c.env.RALD_JWT_SECRET,
     3600
   );
 
-  // Non-blocking: log SSO exchange to login history
   c.executionCtx.waitUntil(
     Promise.resolve(
-      db.from('auth_login_history').insert({
-        user_id:    user.id,
-        app_id:     body.appId,
-        ip_address: ip,
-        success:    true,
+      db.from("auth_login_history").insert({
+        user_id: user.id, app_id: body.appId, ip_address: ip, success: true,
         created_at: new Date().toISOString(),
       })
     ).then(undefined, () => null)
   );
 
   await writeAuditLog(db, {
-    userId: user.id,
-    action: "sso_exchange",
-    ip,
-    status: "success",
+    userId: user.id, action: "sso_exchange", ip, status: "success",
     metadata: { appId: body.appId, redirect_to: redirect_to ?? null },
   });
 
   return c.json({
-    token:       appToken,
-    appId:       body.appId,
-    expiresIn:   3600,
-    redirect_to: redirect_to ?? null,
-    sso_version: 2,
+    token: appToken, appId: body.appId, expiresIn: 3600,
+    redirect_to: redirect_to ?? null, sso_version: 2,
   });
 });
 
@@ -140,29 +201,23 @@ sso.post("/verify", async (c) => {
 });
 
 // ── POST /sso/handoff — redirect-based SSO (browser handoff) ─────────────────
-// Used when a direct API call is not possible (pure browser navigation).
-// Returns a short-lived handoff token + validated redirect_to URL.
 sso.post("/handoff", authMiddleware, async (c) => {
   const user = c.get("user")!;
   const db = c.get("db");
   const ip = getClientIp(c.req.raw);
 
-  const body = await c.req.json<{
-    appId?: string;
-    redirect_to?: string;
-  }>().catch(() => null);
+  const body = await c.req.json<{ appId?: string; redirect_to?: string }>().catch(() => null);
   if (!body?.appId) return c.json({ error: "appId required" }, 400);
-  if (!TRUSTED_APP_IDS.has(body.appId))
-    return c.json({ error: "Unknown app", appId: body.appId }, 400);
 
-  // Strict redirect validation for browser handoff
+  if (!(await isRegisteredApp(db, body.appId)))
+    return c.json({ error: "Unknown app — not registered in the RALD ecosystem", appId: body.appId }, 400);
+
   if (!validateRedirectUrl(body.redirect_to)) {
     return c.json({
       error: "redirect_to is required and must be a valid *.rald.cloud or *.ostloop.name.ng URL",
     }, 400);
   }
 
-  // Short-lived handoff token (5 min)
   const handoffToken = await signJwt(
     { id: user.id, email: user.email, role: user.role, appId: body.appId, purpose: "sso-handoff" },
     c.env.RALD_JWT_SECRET,
@@ -175,20 +230,17 @@ sso.post("/handoff", authMiddleware, async (c) => {
   });
 
   return c.json({
-    handoff_token: handoffToken,
-    redirect_to:   body.redirect_to,
-    expires_in:    300,
-    note:          "Append ?rald_token=<handoff_token> to redirect_to and navigate there",
+    handoff_token: handoffToken, redirect_to: body.redirect_to, expires_in: 300,
+    note: "Append ?rald_token=<handoff_token> to redirect_to and navigate there",
   });
 });
 
-// ── GET /sso/validate-redirect — validate a redirect_to URL ──────────────────
+// ── GET /sso/validate-redirect ────────────────────────────────────────────────
 sso.get("/validate-redirect", (c) => {
   const url = c.req.query("url");
   const valid = validateRedirectUrl(url);
   return c.json({
-    url,
-    valid,
+    url, valid,
     allowed_patterns: ["*.rald.cloud", "*.ostloop.name.ng"],
     reason: valid ? "URL is within the RALD ecosystem" : "URL is not an allowed RALD ecosystem domain",
   });
