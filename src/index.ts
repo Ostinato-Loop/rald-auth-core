@@ -1,6 +1,7 @@
 // RALD Auth Core — Cloudflare Worker
-// Deployed at: auth.rald.cloud | Version: 1.4.0
-// G.9 Remediation: Added RATE_LIMIT_KV binding for per-endpoint rate limiting
+// Deployed at: auth.rald.cloud | Version: 2.0.0
+// Phase: RALD Identity Platform V2 — Universal SSO, profiles.rald.cloud canonical hub
+// Changelog: Added /profiles route, Universal App Provisioning, redirect validation
 // LILCKY STUDIO LIMITED
 
 import { Hono } from "hono";
@@ -13,6 +14,7 @@ import devicesRoutes   from "./routes/devices";
 import ssoRoutes       from "./routes/sso";
 import clerkRoutes     from "./routes/clerk";
 import provisionRoutes from "./routes/provision";
+import profilesRoutes  from "./routes/profiles";
 
 export type Bindings = {
   SUPABASE_URL: string;
@@ -32,21 +34,49 @@ export type Variables = {
   user?: JwtPayload;
 };
 
-const VERSION = "1.4.0";
+const VERSION = "2.0.0";
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
-// ── CORS ─────────────────────────────────────────────────────────────────────
+// ── CORS — all RALD ecosystem domains ─────────────────────────────────────────
+// profiles.rald.cloud is the canonical identity hub (V2)
+// accounts.rald.cloud is removed — all traffic migrated to profiles.rald.cloud
 app.use("*", cors({
   origin: [
-    "https://rald.cloud", "https://app.rald.cloud", "https://accounts.rald.cloud",
-    "https://auth.rald.cloud", "https://identity.rald.cloud", "https://loop.rald.cloud",
-    "https://messenger.rald.cloud", "https://business.rald.cloud", "https://payrald.rald.cloud",
-    "https://admin.rald.cloud", "https://rald-auth-ui.pages.dev", "https://rald-app.pages.dev",
-    "https://rald-control-center.pages.dev", "https://profiles.rald.cloud",
-    "https://profile.rald.cloud", "https://credentials.rald.cloud", "https://sdk.rald.cloud",
-    "https://console.rald.cloud", "https://silicon.rald.cloud", "https://control.rald.cloud",
-    "https://sv.rald.cloud", "http://localhost:5173", "http://localhost:3000",
+    // ── Identity hub (V2 canonical) ─────────────────────────────────────────
+    "https://profiles.rald.cloud",
+    "https://credentials.rald.cloud",
+    // ── Core platform ────────────────────────────────────────────────────────
+    "https://rald.cloud",
+    "https://auth.rald.cloud",
+    "https://admin.rald.cloud",
+    "https://control.rald.cloud",
+    "https://console.rald.cloud",
+    "https://sdk.rald.cloud",
+    "https://sv.rald.cloud",
+    "https://silicon.rald.cloud",
+    // ── Ecosystem apps ────────────────────────────────────────────────────────
+    "https://loop.rald.cloud",
+    "https://messenger.rald.cloud",
+    "https://inbox.rald.cloud",
+    "https://pay.rald.cloud",
+    "https://payrald.rald.cloud",
+    "https://duna.rald.cloud",
+    "https://git.rald.cloud",
+    "https://analytics.rald.cloud",
+    "https://business.rald.cloud",
+    // ── Alternate / legacy (read-only — kept for migration) ───────────────────
+    "https://identity.rald.cloud",
+    // ── CF Pages (CI previews) ────────────────────────────────────────────────
+    "https://rald-auth-ui.pages.dev",
+    "https://rald-app.pages.dev",
+    "https://rald-control-center.pages.dev",
+    // ── ostloop.name.ng domains ───────────────────────────────────────────────
+    "https://ostloop.name.ng",
+    // ── Local dev ─────────────────────────────────────────────────────────────
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://localhost:4173",
   ],
   allowHeaders: ["Authorization", "Content-Type", "X-Request-ID", "X-App-ID"],
   allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -59,13 +89,13 @@ app.use("*", async (c, next) => {
   await next();
 });
 
-// ── Service info helper ───────────────────────────────────────────────────────
 const serviceInfo = (c: { env: Bindings }) => ({
-  service: "rald-auth",
-  version: VERSION,
-  environment: c.env.ENVIRONMENT ?? "production",
-  owner: "LILCKY STUDIO LIMITED",
-  timestamp: new Date().toISOString(),
+  service:      "rald-auth",
+  version:      VERSION,
+  identity_hub: "profiles.rald.cloud",
+  environment:  c.env.ENVIRONMENT ?? "production",
+  owner:        "LILCKY STUDIO LIMITED",
+  timestamp:    new Date().toISOString(),
 });
 
 // ── Health ────────────────────────────────────────────────────────────────────
@@ -84,16 +114,17 @@ app.get("/ready", (c) =>
       clerk:         !!c.env.CLERK_SECRET_KEY && !!c.env.CLERK_PUBLISHABLE_KEY,
       rate_limiting: !!(c.env.RATE_LIMIT_KV),
     },
+    identity_hub: "profiles.rald.cloud",
     ...serviceInfo(c),
   })
 );
 
-// ── System Status ─────────────────────────────────────────────────────────────
 app.get("/system/status", (c) =>
   c.json({
-    status:      "operational",
-    version:     VERSION,
-    environment: c.env.ENVIRONMENT ?? "production",
+    status:       "operational",
+    version:      VERSION,
+    identity_hub: "profiles.rald.cloud",
+    environment:  c.env.ENVIRONMENT ?? "production",
     secrets: {
       supabase:      !!c.env.SUPABASE_URL && !!c.env.SUPABASE_SERVICE_ROLE_KEY,
       jwt:           !!c.env.RALD_JWT_SECRET,
@@ -106,7 +137,6 @@ app.get("/system/status", (c) =>
   })
 );
 
-// ── System Dependencies (live ping) ──────────────────────────────────────────
 app.get("/system/dependencies", async (c) => {
   const checks = await Promise.allSettled([
     (async () => {
@@ -115,7 +145,7 @@ app.get("/system/dependencies", async (c) => {
         headers: { apikey: c.env.SUPABASE_SERVICE_ROLE_KEY },
         signal: AbortSignal.timeout(5000),
       });
-      return { name: "supabase", ok: r.ok, latency: Date.now() - t0, note: "auth_users table namespace" };
+      return { name: "supabase", ok: r.ok, latency: Date.now() - t0 };
     })(),
     (async () => {
       const t0 = Date.now();
@@ -123,7 +153,7 @@ app.get("/system/dependencies", async (c) => {
         `https://api.ng.termii.com/api/get-balance?api_key=${c.env.TERMII_API_KEY}`,
         { signal: AbortSignal.timeout(5000) }
       );
-      const d  = await r.json() as { balance?: number; currency?: string };
+      const d = await r.json() as { balance?: number; currency?: string };
       return { name: "termii", ok: r.ok, latency: Date.now() - t0, balance: d.balance, currency: d.currency };
     })(),
     (async () => {
@@ -141,11 +171,8 @@ app.get("/system/dependencies", async (c) => {
       ? c.value
       : { name: "unknown", ok: false, latency: -1, error: String((c as PromiseRejectedResult).reason) }
   );
-
   const allOk = results.every((r) => r.ok);
-  return c.json({ ok: allOk, dependencies: results, timestamp: new Date().toISOString() },
-    allOk ? 200 : 503
-  );
+  return c.json({ ok: allOk, dependencies: results, timestamp: new Date().toISOString() }, allOk ? 200 : 503);
 });
 
 // ── Routes ────────────────────────────────────────────────────────────────────
@@ -154,6 +181,7 @@ app.route("/devices",   devicesRoutes);
 app.route("/sso",       ssoRoutes);
 app.route("/sso",       clerkRoutes);
 app.route("/provision", provisionRoutes);
+app.route("/profiles",  profilesRoutes);
 
 // ── Root ──────────────────────────────────────────────────────────────────────
 app.get("/", (c) => c.json({ docs: "https://auth.rald.cloud/health", ...serviceInfo(c) }));
