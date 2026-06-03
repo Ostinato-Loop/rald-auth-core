@@ -29,15 +29,12 @@ jobs:
         run: npm run typecheck
 
       - name: Resolve KV namespace IDs via Cloudflare API
-        # Uses the CF REST API directly — no wrangler CLI flags needed.
-        # Creates each namespace if it does not yet exist, then patches wrangler.toml.
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           node << 'JSEOF'
           const fs = require('fs');
-
           const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
           const token     = process.env.CLOUDFLARE_API_TOKEN;
           const headers   = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
@@ -51,13 +48,9 @@ jobs:
           }
 
           async function createNamespace(title) {
-            const r = await fetch(base, {
-              method: 'POST', headers,
-              body: JSON.stringify({ title }),
-            });
+            const r = await fetch(base, { method: 'POST', headers, body: JSON.stringify({ title }) });
             const d = await r.json();
             if (!d.success) {
-              // Already exists with that title? Find it.
               if (d.errors?.some(e => e.code === 10014)) {
                 const all = await listNamespaces();
                 const existing = all.find(n => n.title === title);
@@ -71,10 +64,7 @@ jobs:
           async function resolveId(title) {
             const all = await listNamespaces();
             const existing = all.find(n => n.title === title);
-            if (existing) {
-              console.log(`  [existing] ${title} → ${existing.id.slice(0,8)}...`);
-              return existing.id;
-            }
+            if (existing) { console.log(`  [existing] ${title} → ${existing.id.slice(0,8)}...`); return existing.id; }
             const id = await createNamespace(title);
             console.log(`  [created]  ${title} → ${id.slice(0,8)}...`);
             return id;
@@ -82,11 +72,10 @@ jobs:
 
           (async () => {
             console.log('Resolving KV namespace IDs...');
-            const rateLimitId  = await resolveId('rald-auth-rate-limit');
-            const sessionKvId  = await resolveId('rald-session');
-
+            const rateLimitId = await resolveId('rald-auth-rate-limit');
+            const sessionKvId = await resolveId('rald-session');
             let toml = fs.readFileSync('wrangler.toml', 'utf8');
-            toml = toml.replace('REPLACE_WITH_RATE_LIMIT_KV_NAMESPACE_ID',  rateLimitId);
+            toml = toml.replace('REPLACE_WITH_RATE_LIMIT_KV_NAMESPACE_ID', rateLimitId);
             toml = toml.replace('REPLACE_WITH_RALD_SESSION_KV_NAMESPACE_ID', sessionKvId);
             fs.writeFileSync('wrangler.toml', toml);
             console.log('wrangler.toml patched with real KV namespace IDs.');
@@ -98,3 +87,15 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Push RALD_JWT_SECRET to rald-auth worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          RALD_JWT_SECRET: ${{ secrets.RALD_JWT_SECRET }}
+        run: |
+          if [ -z "$RALD_JWT_SECRET" ]; then
+            echo "FATAL: RALD_JWT_SECRET not set in GitHub secrets — add it and redeploy" && exit 1
+          fi
+          echo "$RALD_JWT_SECRET" | npx wrangler secret put RALD_JWT_SECRET --name rald-auth
+          echo "RALD_JWT_SECRET pushed to rald-auth worker"
