@@ -116,7 +116,6 @@ app.get("/ready", (c) =>
       rate_limit_kv: !!(c.env.RATE_LIMIT_KV),
       session_kv:    !!(c.env.RALD_SESSION_KV),
     },
-    identity_hub: "profiles.rald.cloud",
     ...serviceInfo(c),
   })
 );
