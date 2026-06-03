@@ -24,6 +24,9 @@ jobs:
         run: npm install
       - name: Type check
         run: npm run typecheck
+      - name: Security audit
+        run: npm audit --audit-level=high
+        continue-on-error: true
 
   build:
     name: Build (dry-run)
@@ -40,5 +43,5 @@ jobs:
       - name: Build (dry-run)
         run: npm run build
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN: dry-run-no-token-needed
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
