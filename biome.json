@@ -1,12 +1,23 @@
 {
   "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
-  "organizeImports": { "enabled": true },
+  "organizeImports": { "enabled": false },
   "linter": {
     "enabled": true,
     "rules": {
       "recommended": true,
-      "suspicious": { "noExplicitAny": "warn" },
-      "style": { "noNonNullAssertion": "warn" }
+      "suspicious": {
+        "noExplicitAny": "warn",
+        "noConfusingVoidType": "warn"
+      },
+      "style": {
+        "noNonNullAssertion": "warn",
+        "useImportType": "off",
+        "useTemplate": "warn"
+      },
+      "correctness": {
+        "noUnusedVariables": "warn",
+        "noUnusedImports": "warn"
+      }
     }
   },
   "formatter": { "enabled": false },
