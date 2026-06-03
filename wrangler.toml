@@ -4,16 +4,18 @@ compatibility_date = "2025-01-01"
 compatibility_flags = []
 
 [vars]
-ENVIRONMENT = "production"
+ENVIRONMENT  = "production"
+SUPABASE_URL = "https://onxdcikfttdmnhofsuwo.supabase.co"
 
 # Secrets — set via: wrangler secret put <NAME>
 # Required:
-#   SUPABASE_URL
-#   SUPABASE_SERVICE_ROLE_KEY
-#   RALD_JWT_SECRET          — 64-char base64url JWT signing secret
-#   TERMII_API_KEY           — SMS OTP (https://termii.com)
-#   TERMII_SENDER_ID         — Registered sender ID (e.g. "RALD")
-#   RESEND_API_KEY           — Email OTP / transactional email (https://resend.com)
+#   SUPABASE_SERVICE_ROLE_KEY — Supabase service role key
+#   RALD_JWT_SECRET           — 64-char base64url JWT signing secret
+#   TERMII_API_KEY            — SMS OTP (https://termii.com)
+#   TERMII_SENDER_ID          — Registered sender ID (e.g. "RALD")
+#   RESEND_API_KEY            — Email OTP / transactional email (https://resend.com)
+#   CLERK_SECRET_KEY          — Clerk backend API key
+#   CLERK_PUBLISHABLE_KEY     — Clerk publishable key
 
 [[routes]]
 pattern = "auth.rald.cloud/*"
