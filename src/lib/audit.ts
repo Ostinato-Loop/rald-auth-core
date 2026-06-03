@@ -1,10 +1,12 @@
 // RALD Auth Core — Audit Logging
 // Writes to audit_logs table (best-effort — never throws, never blocks main flow).
+// Phase G.10: Expanded AuditAction types for session management
 // LILCKY STUDIO LIMITED
 
 import { SupabaseClient } from "@supabase/supabase-js";
 
 export type AuditAction =
+  // Auth
   | "login"
   | "login_failed"
   | "logout"
@@ -14,11 +16,27 @@ export type AuditAction =
   | "otp_failed"
   | "password_reset_requested"
   | "password_reset_completed"
+  // Sessions
+  | "session_created"
   | "session_revoked"
   | "all_sessions_revoked"
-  | "rate_limited"
+  | "forced_logout"
+  // Devices
+  | "device_trusted"
+  | "device_revoked"
+  // SSO & Provisioning
   | "sso_exchange"
-  | "token_verified";
+  | "sso_handoff_issued"
+  | "token_verified"
+  | "app_provisioned"
+  | "app_provisioned_by_admin"
+  // Account
+  | "account_suspended"
+  | "account_unsuspended"
+  | "account_deleted"
+  // Security
+  | "rate_limited"
+  | "redirect_rejected";
 
 export interface AuditEntry {
   userId?: string | null;
