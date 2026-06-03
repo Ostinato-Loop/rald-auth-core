@@ -22,21 +22,20 @@ pattern = "auth.rald.cloud/*"
 zone_name = "rald.cloud"
 
 # ── KV Namespaces ─────────────────────────────────────────────────────────────
-
 # Rate limiting store.
-# Create with: wrangler kv namespace create rald-auth-rate-limit
-# Then replace the id below with the generated namespace ID.
+# To create: wrangler kv namespace create rald-auth-rate-limit
+# Then replace the id below with the actual namespace ID from the output.
 [[kv_namespaces]]
 binding = "RATE_LIMIT_KV"
-id = "REPLACE_WITH_RATE_LIMIT_KV_ID"
+id = "00000000000000000000000000000001"
 
 # Session Authority (Phase G.10) — stores session state for logout-everywhere,
 # device revocation, account suspension, forced signout.
-# Create with: wrangler kv namespace create rald-session
-# Then replace the id below with the generated namespace ID.
+# To create: wrangler kv namespace create rald-session
+# Then replace the id below with the actual namespace ID from the output.
 [[kv_namespaces]]
 binding = "RALD_SESSION_KV"
-id = "REPLACE_WITH_RALD_SESSION_KV_ID"
+id = "00000000000000000000000000000002"
 
 [build]
 command = ""
