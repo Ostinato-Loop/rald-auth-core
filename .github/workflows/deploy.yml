@@ -28,6 +28,60 @@ jobs:
       - name: Type check
         run: npm run typecheck
 
+      - name: Resolve KV namespace IDs
+        # wrangler v4 validates KV IDs against the CF API at deploy time.
+        # This step ensures both namespaces exist and patches the real IDs into
+        # wrangler.toml before deploying. Safe to re-run — uses existing namespaces.
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          echo "Fetching existing KV namespaces..."
+          NAMESPACES=$(npx wrangler kv namespace list --json 2>/dev/null || echo '[]')
+          echo "Namespaces fetched."
+
+          # Extract or create rald-auth-rate-limit
+          RATE_LIMIT_ID=$(echo "$NAMESPACES" | node -e "
+            let d=''; process.stdin.on('data',c=>d+=c);
+            process.stdin.on('end',()=>{
+              try {
+                const ns=JSON.parse(d);
+                const f=ns.find(n=>n.title==='rald-auth-rate-limit');
+                console.log(f ? f.id : '');
+              } catch { console.log(''); }
+            });")
+
+          if [ -z "$RATE_LIMIT_ID" ]; then
+            echo "Creating rald-auth-rate-limit namespace..."
+            RATE_LIMIT_ID=$(npx wrangler kv namespace create rald-auth-rate-limit --json 2>/dev/null \
+              | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{console.log(JSON.parse(d).id);}catch{console.log('');}});")
+          fi
+
+          # Extract or create rald-session
+          SESSION_KV_ID=$(echo "$NAMESPACES" | node -e "
+            let d=''; process.stdin.on('data',c=>d+=c);
+            process.stdin.on('end',()=>{
+              try {
+                const ns=JSON.parse(d);
+                const f=ns.find(n=>n.title==='rald-session');
+                console.log(f ? f.id : '');
+              } catch { console.log(''); }
+            });")
+
+          if [ -z "$SESSION_KV_ID" ]; then
+            echo "Creating rald-session namespace..."
+            SESSION_KV_ID=$(npx wrangler kv namespace create rald-session --json 2>/dev/null \
+              | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{console.log(JSON.parse(d).id);}catch{console.log('');}});")
+          fi
+
+          echo "RATE_LIMIT_KV  ID: ${RATE_LIMIT_ID:0:8}..."
+          echo "RALD_SESSION_KV ID: ${SESSION_KV_ID:0:8}..."
+
+          # Patch wrangler.toml with real IDs
+          sed -i "s/REPLACE_WITH_RATE_LIMIT_KV_NAMESPACE_ID/$RATE_LIMIT_ID/" wrangler.toml
+          sed -i "s/REPLACE_WITH_RALD_SESSION_KV_NAMESPACE_ID/$SESSION_KV_ID/" wrangler.toml
+          echo "wrangler.toml patched."
+
       - name: Deploy rald-auth Worker
         run: npx wrangler deploy
         env:
