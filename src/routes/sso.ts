@@ -100,13 +100,15 @@ sso.post("/exchange", authMiddleware, async (c) => {
 
   // Non-blocking: log SSO exchange to login history
   c.executionCtx.waitUntil(
-    db.from("auth_login_history").insert({
-      user_id:    user.id,
-      app_id:     body.appId,
-      ip_address: ip,
-      success:    true,
-      created_at: new Date().toISOString(),
-    }).catch(() => null)
+    Promise.resolve(
+      db.from('auth_login_history').insert({
+        user_id:    user.id,
+        app_id:     body.appId,
+        ip_address: ip,
+        success:    true,
+        created_at: new Date().toISOString(),
+      })
+    ).then(undefined, () => null)
   );
 
   await writeAuditLog(db, {
