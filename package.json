@@ -8,6 +8,7 @@
     "build": "wrangler deploy --dry-run",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
@@ -15,6 +16,7 @@
     "hono": "^4.7.5"
   },
   "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
     "@cloudflare/workers-types": "^4.20250525.0",
     "typescript": "^5.8.3",
     "wrangler": "^4.14.4"
