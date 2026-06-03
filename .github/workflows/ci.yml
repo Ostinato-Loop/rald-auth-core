@@ -24,6 +24,8 @@ jobs:
         run: npm install
       - name: Type check
         run: npm run typecheck
+      - name: Lint
+        run: npm run lint
       - name: Security audit
         run: npm audit --audit-level=high
         continue-on-error: true
