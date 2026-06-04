@@ -1,7 +1,8 @@
 // RALD Auth Core — Cloudflare Worker
-// Deployed at: auth.rald.cloud | Version: 2.1.0
-// Phase G.10: KV Session Authority (rald-session), /session broker, /me shortcut, /logout
-// Changelog v2.1.0: RALD_SESSION_KV binding, session route, expanded audit types
+// Deployed at: auth.rald.cloud | Version: 2.2.0
+// Phase H.1: Identity Graph + Search Architecture
+// Changelog v2.2.0: /search/* (public + relationship search), /graph/* (identity graph, mutual connections, suggestions)
+// Fixed: duplicate buildSessionCookie import in auth.ts
 // LILCKY STUDIO LIMITED
 
 import { Hono } from "hono";
@@ -17,6 +18,8 @@ import clerkRoutes     from "./routes/clerk";
 import provisionRoutes from "./routes/provision";
 import profilesRoutes  from "./routes/profiles";
 import sessionRoutes   from "./routes/session";
+import searchRoutes    from "./routes/search";
+import graphRoutes     from "./routes/graph";
 
 export type Bindings = {
   SUPABASE_URL: string;
@@ -191,6 +194,8 @@ app.route("/sso",       ssoRoutes);
 app.route("/sso",       clerkRoutes);
 app.route("/provision", provisionRoutes);
 app.route("/profiles",  profilesRoutes);
+app.route("/search",    searchRoutes);    // GET /search/users · GET /search/related
+app.route("/graph",     graphRoutes);     // GET /graph/me · GET /graph/mutual/:id · POST /graph/connect
 app.route("/",          sessionRoutes);   // GET /session · GET /me · POST /logout etc.
 
 // ── Root ──────────────────────────────────────────────────────────────────────
