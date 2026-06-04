@@ -7,6 +7,7 @@ import { Hono } from "hono";
 import type { Bindings, Variables } from "../index";
 import { authMiddleware, adminMiddleware } from "../lib/middleware";
 import { verifyJwt, generateSecureToken } from "../lib/auth";
+import { buildSessionCookie, clearSessionCookie, parseSessionCookie } from "../lib/cookie";
 import {
   isSessionActive,
   isUserSuspended,
@@ -100,6 +101,7 @@ session.post("/logout", authMiddleware, async (c) => {
     await Promise.resolve(db.from("auth_sessions").update({ revoked_at: new Date().toISOString() }).eq("user_id", user.id).is("revoked_at", null).gte("expires_at", new Date().toISOString()).order("created_at", { ascending: false }).limit(1)).then(undefined, () => null);
   }
   await writeAuditLog(db, { userId: user.id, action: "logout", ip, status: "success", metadata: { session_id: sessionId } });
+  c.header("Set-Cookie", clearSessionCookie());
   return c.json({ ok: true, message: "Logged out successfully", redirect: "https://profiles.rald.cloud/login" });
 });
 
@@ -173,3 +175,43 @@ session.post("/session/register", authMiddleware, async (c) => {
 });
 
 export default session;
+
+// ── GET /sso/silent — cookie-based silent session validation ─────────────────
+// Products call their OWN worker which forwards the Cookie header here,
+// OR they call this endpoint directly. Returns valid user without a redirect.
+session.get("/sso/silent", async (c) => {
+  const cookieHeader = c.req.header("Cookie");
+  const token = parseSessionCookie(cookieHeader);
+  if (!token) {
+    return c.json({ valid: false, reason: "no_session_cookie", redirect: "https://profiles.rald.cloud/login" }, 401);
+  }
+  const payload = await verifyJwt(token, c.env.RALD_JWT_SECRET);
+  if (!payload) {
+    c.header("Set-Cookie", clearSessionCookie());
+    return c.json({ valid: false, reason: "invalid_or_expired_token", redirect: "https://profiles.rald.cloud/login" }, 401);
+  }
+  const kv = getSessionKv(c.env);
+  if (kv) {
+    const suspended = await isUserSuspended(kv, payload.id);
+    if (suspended) {
+      return c.json({ valid: false, reason: "account_suspended", redirect: "https://profiles.rald.cloud/suspended" }, 403);
+    }
+    const p = payload as unknown as Record<string, unknown>;
+    const sessionId = (p.session_id ?? p.sid ?? null) as string | null;
+    if (sessionId) {
+      const { active, reason } = await isSessionActive(kv, sessionId);
+      if (!active) {
+        c.header("Set-Cookie", clearSessionCookie());
+        return c.json({ valid: false, reason, redirect: "https://profiles.rald.cloud/login" }, 401);
+      }
+    }
+  }
+  // Refresh cookie TTL
+  c.header("Set-Cookie", buildSessionCookie(token));
+  return c.json({
+    valid: true,
+    user: { id: payload.id, email: payload.email, role: payload.role },
+    session: { expires_at: new Date(payload.exp * 1000).toISOString() },
+    identity_hub: "profiles.rald.cloud",
+  });
+});
