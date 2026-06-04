@@ -174,11 +174,10 @@ session.post("/session/register", authMiddleware, async (c) => {
   return c.json({ ok: true, session_id: sessionId, expires_at: expiresAt });
 });
 
-export default session;
-
 // ── GET /sso/silent — cookie-based silent session validation ─────────────────
 // Products call their OWN worker which forwards the Cookie header here,
 // OR they call this endpoint directly. Returns valid user without a redirect.
+// Sprint 01: D-010 — this route MUST be registered before export default.
 session.get("/sso/silent", async (c) => {
   const cookieHeader = c.req.header("Cookie");
   const token = parseSessionCookie(cookieHeader);
@@ -206,7 +205,7 @@ session.get("/sso/silent", async (c) => {
       }
     }
   }
-  // Refresh cookie TTL
+  // Refresh cookie TTL on every valid silent check
   c.header("Set-Cookie", buildSessionCookie(token));
   return c.json({
     valid: true,
@@ -215,3 +214,4 @@ session.get("/sso/silent", async (c) => {
     identity_hub: "profiles.rald.cloud",
   });
 });
+export default session;
