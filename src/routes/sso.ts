@@ -8,6 +8,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Bindings, Variables } from "../index";
 import { authMiddleware, adminMiddleware } from "../lib/middleware";
 import { signJwt, verifyJwt } from "../lib/auth";
+import { buildSessionCookie } from "../lib/cookie";
 import { validateRedirectUrl, safeRedirect, ECOSYSTEM_APPS } from "../lib/redirect";
 import { writeAuditLog } from "../lib/audit";
 import { getClientIp } from "../lib/rate-limit";
@@ -183,6 +184,7 @@ sso.post("/exchange", authMiddleware, async (c) => {
     metadata: { appId: body.appId, redirect_to: redirect_to ?? null },
   });
 
+  c.header("Set-Cookie", buildSessionCookie(appToken, 3600));
   return c.json({
     token: appToken, appId: body.appId, expiresIn: 3600,
     redirect_to: redirect_to ?? null, sso_version: 2,
