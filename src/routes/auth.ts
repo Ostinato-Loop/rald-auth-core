@@ -4,6 +4,8 @@
 // LILCKY STUDIO LIMITED
 
 import { Hono } from "hono";
+import { buildSessionCookie } from "../lib/cookie";
+import { buildSessionCookie } from "../lib/cookie";
 import type { Bindings, Variables } from "../index";
 import { signJwt, verifyJwt, verifyPassword, hashPassword } from "../lib/auth";
 import { authMiddleware } from "../lib/middleware";
@@ -99,6 +101,8 @@ auth.post("/login", async (c) => {
   }
 
   await writeAuditLog(db, { userId: user.id, action: "login", ip, status: "success", metadata: { email } });
+  c.header("Set-Cookie", buildSessionCookie(token));
+
   return c.json({ token, user: userShape(user) });
 });
 
@@ -166,6 +170,8 @@ auth.post("/register", async (c) => {
     sendWelcomeEmail(newUser.email, newUser.name ?? name, c.env.RESEND_API_KEY).catch(console.error);
 
   await writeAuditLog(db, { userId: newUser.id, action: "register", ip, status: "success", metadata: { email, role } });
+  c.header("Set-Cookie", buildSessionCookie(token));
+
   return c.json({ token, user: userShape(newUser) }, 201);
 });
 
@@ -341,6 +347,8 @@ auth.post("/register-from-otp", async (c) => {
     sendWelcomeEmail(newUser.email, newUser.name ?? name, c.env.RESEND_API_KEY).catch(console.error);
 
   await writeAuditLog(db, { userId: newUser.id, action: "register", ip, status: "success", metadata: { email, role, via: "otp" } });
+  c.header("Set-Cookie", buildSessionCookie(token));
+
   return c.json({ token, user: userShape(newUser) }, 201);
 });
 
