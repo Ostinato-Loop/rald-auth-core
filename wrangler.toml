@@ -21,13 +21,13 @@ zone_name = "rald.cloud"
 # Then replace the id string with the actual namespace ID.
 [[kv_namespaces]]
 binding = "RATE_LIMIT_KV"
-id = "REPLACE_WITH_RATE_LIMIT_KV_NAMESPACE_ID"
+id = "b0e3c620619c4aab85e5f59f6ebddc0e"
 
 # Create: wrangler kv namespace create rald-session
 # Then replace the id string with the actual namespace ID.
 [[kv_namespaces]]
 binding = "RALD_SESSION_KV"
-id = "REPLACE_WITH_RALD_SESSION_KV_NAMESPACE_ID"
+id = "15ee70c2a0534880a11843469d0468ef"
 
 [build]
 command = ""
