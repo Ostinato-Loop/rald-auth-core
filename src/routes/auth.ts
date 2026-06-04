@@ -5,7 +5,6 @@
 
 import { Hono } from "hono";
 import { buildSessionCookie } from "../lib/cookie";
-import { buildSessionCookie } from "../lib/cookie";
 import type { Bindings, Variables } from "../index";
 import { signJwt, verifyJwt, verifyPassword, hashPassword } from "../lib/auth";
 import { authMiddleware } from "../lib/middleware";
