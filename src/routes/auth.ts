@@ -162,9 +162,16 @@ auth.post("/register", async (c) => {
 
   const newUser = newUsers[0]!;
   const token = await signJwt(
-    { id: newUser.id, email: newUser.email, role: newUser.role },
+    { id: newUser.id, email: newUser.email, role: newUser.role, iss: "rald.cloud" },
     c.env.RALD_JWT_SECRET
   );
+
+  db.from("auth_user_profiles").insert({
+    user_id:      newUser.id,
+    display_name: name,
+    search_discoverable: true,
+  }).then(() => {}).catch((e: unknown) => console.error("[rald-auth] profile insert failed:", String(e)));
+
   if (c.env.RESEND_API_KEY)
     sendWelcomeEmail(newUser.email, newUser.name ?? name, c.env.RESEND_API_KEY).catch(console.error);
 
