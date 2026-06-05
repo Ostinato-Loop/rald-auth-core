@@ -45,7 +45,7 @@ graph.get("/me", authMiddleware, async (c) => {
     user_id:     user.id,
     connections: connections ?? [],
     count:       (connections ?? []).length,
-    rald_id:     `RALD-${user.id.split("-")[0].toUpperCase()}`,
+    rald_id:     `RALD-${(user.id.split("-").at(0) ?? user.id).toUpperCase()}`,
   });
 });
 
@@ -251,7 +251,7 @@ graph.get("/suggestions", authMiddleware, async (c) => {
   const suggestions = (profiles ?? []).map((p: Record<string, unknown>) => ({
     ...p,
     mutual_score: scoreMap.get(p["user_id"] as string) ?? 0,
-    rald_id: `RALD-${(p["user_id"] as string).split("-")[0].toUpperCase()}`,
+    rald_id: `RALD-${((p["user_id"] as string).split("-").at(0) ?? String(p["user_id"])).toUpperCase()}`,
   }));
 
   return c.json({ suggestions, count: suggestions.length });
