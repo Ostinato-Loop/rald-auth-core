@@ -65,7 +65,7 @@ graph.get("/mutual/:userId", authMiddleware, async (c) => {
     .select("target_user_id")
     .eq("user_id", user.id);
 
-  const myConnIds = new Set((myConns ?? []).map((r: Record<string, unknown>) => r["target_user_id"] as string));
+  const myConnIds = new Set((myConns ?? []).map((r: Record<string, unknown>) => r.target_user_id as string));
 
   // Get connections of the target user
   const { data: theirConns } = await db
@@ -73,7 +73,7 @@ graph.get("/mutual/:userId", authMiddleware, async (c) => {
     .select("target_user_id")
     .eq("user_id", targetId);
 
-  const theirConnIds = (theirConns ?? []).map((r: Record<string, unknown>) => r["target_user_id"] as string);
+  const theirConnIds = (theirConns ?? []).map((r: Record<string, unknown>) => r.target_user_id as string);
   const mutualIds    = theirConnIds.filter((id) => myConnIds.has(id));
 
   if (mutualIds.length === 0) {
@@ -207,7 +207,7 @@ graph.get("/suggestions", authMiddleware, async (c) => {
 
   const existingIds = new Set([
     user.id,
-    ...(existing ?? []).map((r: Record<string, unknown>) => r["target_user_id"] as string),
+    ...(existing ?? []).map((r: Record<string, unknown>) => r.target_user_id as string),
   ]);
 
   // Find users connected to my connections (friends of friends)
@@ -231,8 +231,8 @@ graph.get("/suggestions", authMiddleware, async (c) => {
   // Score aggregation: sum connection_scores across all paths
   const scoreMap = new Map<string, number>();
   for (const r of friendsOfFriends as Array<Record<string, unknown>>) {
-    const id  = r["target_user_id"] as string;
-    const sc  = r["connection_score"] as number ?? 0;
+    const id  = r.target_user_id as string;
+    const sc  = r.connection_score as number ?? 0;
     scoreMap.set(id, (scoreMap.get(id) ?? 0) + sc);
   }
 
@@ -250,8 +250,8 @@ graph.get("/suggestions", authMiddleware, async (c) => {
 
   const suggestions = (profiles ?? []).map((p: Record<string, unknown>) => ({
     ...p,
-    mutual_score: scoreMap.get(p["user_id"] as string) ?? 0,
-    rald_id: `RALD-${((p["user_id"] as string).split("-").at(0) ?? String(p["user_id"])).toUpperCase()}`,
+    mutual_score: scoreMap.get(p.user_id as string) ?? 0,
+    rald_id: `RALD-${((p.user_id as string).split("-").at(0) ?? String(p.user_id)).toUpperCase()}`,
   }));
 
   return c.json({ suggestions, count: suggestions.length });
