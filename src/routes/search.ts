@@ -99,14 +99,14 @@ search.get("/users", async (c) => {
         : await q1.ilike("username", pattern);
 
       const results = (fallback ?? []).map((r: Record<string, unknown>) => ({
-        id:           r["user_id"],
-        rald_id:      r["user_id"] ? `RALD-${(String(r["user_id"]).split("-").at(0) ?? String(r["user_id"])).toUpperCase()}` : null,
-        username:     r["username"],
-        display_name: r["display_name"],
-        avatar_url:   r["avatar_url"],
-        bio:          r["bio"],
-        location:     r["location"],
-        is_verified:  r["is_verified"],
+        id:           r.user_id,
+        rald_id:      r.user_id ? `RALD-${(String(r.user_id).split("-").at(0) ?? String(r.user_id)).toUpperCase()}` : null,
+        username:     r.username,
+        display_name: r.display_name,
+        avatar_url:   r.avatar_url,
+        bio:          r.bio,
+        location:     r.location,
+        is_verified:  r.is_verified,
         match_type:   "profile",
       }));
 
@@ -167,7 +167,7 @@ search.get("/related", authMiddleware, async (c) => {
     }
 
     // Step 2: Score each result by relationship closeness
-    const userIds = allMatches.map((m: Record<string, unknown>) => m["user_id"] as string);
+    const userIds = allMatches.map((m: Record<string, unknown>) => m.user_id as string);
 
     // Check mutual connections (rald_connections table)
     const { data: mutualConns } = await db
@@ -177,31 +177,31 @@ search.get("/related", authMiddleware, async (c) => {
       .in("target_user_id", userIds);
 
     const connectionMap = new Map<string, number>();
-    (mutualConns ?? []).forEach((c: Record<string, unknown>) => {
-      connectionMap.set(c["target_user_id"] as string, (c["connection_score"] as number) ?? 1);
-    });
+    for (const c of (mutualConns ?? [])) {
+      connectionMap.set(c.target_user_id as string, (c.connection_score as number) ?? 1);
+    }
 
     // Step 3: Build ranked results
     const ranked = allMatches
       .map((m: Record<string, unknown>) => {
-        const uid = m["user_id"] as string;
+        const uid = m.user_id as string;
         let score = 0;
         // Direct connection: +10
         if (connectionMap.has(uid)) score += 10 + (connectionMap.get(uid) ?? 0);
         // Prefix username match: +3
-        const username = (m["username"] as string ?? "").toLowerCase();
-        const displayName = (m["display_name"] as string ?? "").toLowerCase();
+        const username = (m.username as string ?? "").toLowerCase();
+        const displayName = (m.display_name as string ?? "").toLowerCase();
         if (username.startsWith(q.toLowerCase())) score += 3;
         if (displayName.startsWith(q.toLowerCase())) score += 2;
 
         return {
           id:           uid,
           rald_id:      `RALD-${(uid.split("-").at(0) ?? uid).toUpperCase()}`,
-          username:     m["username"],
-          display_name: m["display_name"],
-          avatar_url:   m["avatar_url"],
-          bio:          m["bio"],
-          is_verified:  m["is_verified"],
+          username:     m.username,
+          display_name: m.display_name,
+          avatar_url:   m.avatar_url,
+          bio:          m.bio,
+          is_verified:  m.is_verified,
           connection_score: connectionMap.get(uid) ?? 0,
           _rank:        score,
         };
