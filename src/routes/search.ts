@@ -100,7 +100,7 @@ search.get("/users", async (c) => {
 
       const results = (fallback ?? []).map((r: Record<string, unknown>) => ({
         id:           r["user_id"],
-        rald_id:      r["user_id"] ? `RALD-${String(r["user_id"]).split("-")[0].toUpperCase()}` : null,
+        rald_id:      r["user_id"] ? `RALD-${(String(r["user_id"]).split("-").at(0) ?? String(r["user_id"])).toUpperCase()}` : null,
         username:     r["username"],
         display_name: r["display_name"],
         avatar_url:   r["avatar_url"],
@@ -196,7 +196,7 @@ search.get("/related", authMiddleware, async (c) => {
 
         return {
           id:           uid,
-          rald_id:      `RALD-${uid.split("-")[0].toUpperCase()}`,
+          rald_id:      `RALD-${(uid.split("-").at(0) ?? uid).toUpperCase()}`,
           username:     m["username"],
           display_name: m["display_name"],
           avatar_url:   m["avatar_url"],
