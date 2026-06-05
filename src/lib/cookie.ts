@@ -11,7 +11,7 @@ export function buildSessionCookie(token: string, ttlSeconds = SESSION_TTL_S): s
   return [
     `${COOKIE_NAME}=${token}`,
     `Domain=${COOKIE_DOMAIN}`,
-    `Path=/`,
+    "Path=/",
     `Max-Age=${ttlSeconds}`,
     "HttpOnly",
     "Secure",
@@ -24,9 +24,9 @@ export function clearSessionCookie(): string {
   return [
     `${COOKIE_NAME}=`,
     `Domain=${COOKIE_DOMAIN}`,
-    `Path=/`,
-    `Max-Age=0`,
-    `Expires=Thu, 01 Jan 1970 00:00:00 GMT`,
+    "Path=/",
+    "Max-Age=0",
+    "Expires=Thu, 01 Jan 1970 00:00:00 GMT",
     "HttpOnly",
     "Secure",
     "SameSite=Lax",
