@@ -30,7 +30,7 @@ privacy.get("/me", authMiddleware, async (c) => {
     data_collected: {
       email:      u.email,
       name:       u.name,
-      phone:      meta["phone"] ?? null,
+      phone:      meta.phone ?? null,
       created_at: u.created_at,
       avatar_url: profileRes.data?.avatar_url ?? null,
       bio:        profileRes.data?.bio ?? null,
@@ -38,9 +38,9 @@ privacy.get("/me", authMiddleware, async (c) => {
     connected_apps:  (appsRes.data ?? []).map((a: { product: string }) => a.product),
     active_sessions: sessionsRes.data?.length ?? 0,
     permissions: {
-      profile_visible:   meta["profile_visible"] !== false,
-      activity_tracking: meta["activity_tracking"] !== false,
-      marketing_emails:  meta["marketing_emails"] !== false,
+      profile_visible:   meta.profile_visible !== false,
+      activity_tracking: meta.activity_tracking !== false,
+      marketing_emails:  meta.marketing_emails !== false,
     },
     data_residency:   "Nigeria (af-south-1)",
     retention_policy: "Account data retained for 90 days after deletion request.",
@@ -149,9 +149,9 @@ privacy.patch("/permissions", authMiddleware, async (c) => {
 
   const meta: Record<string, unknown> = (userRow?.metadata as Record<string, unknown>) ?? {};
 
-  if (body.profile_visible   !== undefined) meta["profile_visible"]   = body.profile_visible;
-  if (body.activity_tracking !== undefined) meta["activity_tracking"] = body.activity_tracking;
-  if (body.marketing_emails  !== undefined) meta["marketing_emails"]  = body.marketing_emails;
+  if (body.profile_visible   !== undefined) meta.profile_visible   = body.profile_visible;
+  if (body.activity_tracking !== undefined) meta.activity_tracking = body.activity_tracking;
+  if (body.marketing_emails  !== undefined) meta.marketing_emails  = body.marketing_emails;
 
   const { error } = await db.from("auth_users").update({ metadata: meta }).eq("id", user.id);
   if (error) return c.json({ error: "Failed to update preferences" }, 500);
@@ -191,10 +191,10 @@ privacy.post("/delete-request", authMiddleware, async (c) => {
     .single();
 
   const meta: Record<string, unknown> = (userRow?.metadata as Record<string, unknown>) ?? {};
-  meta["deletion_requested_at"] = new Date().toISOString();
-  meta["deletion_scheduled_at"] = scheduledAt;
-  meta["deletion_reason"]       = body.reason ?? "User request";
-  meta["status"]                = "pending_deletion";
+  meta.deletion_requested_at = new Date().toISOString();
+  meta.deletion_scheduled_at = scheduledAt;
+  meta.deletion_reason       = body.reason ?? "User request";
+  meta.status                = "pending_deletion";
 
   await db.from("auth_users").update({ metadata: meta }).eq("id", user.id);
 
@@ -230,14 +230,14 @@ privacy.post("/cancel-deletion", authMiddleware, async (c) => {
 
   const meta: Record<string, unknown> = (userRow?.metadata as Record<string, unknown>) ?? {};
 
-  if (!meta["deletion_requested_at"]) {
+  if (!meta.deletion_requested_at) {
     return c.json({ error: "No pending deletion request found" }, 404);
   }
 
-  delete meta["deletion_requested_at"];
-  delete meta["deletion_scheduled_at"];
-  delete meta["deletion_reason"];
-  delete meta["status"];
+  delete meta.deletion_requested_at;
+  delete meta.deletion_scheduled_at;
+  delete meta.deletion_reason;
+  delete meta.status;
 
   await db.from("auth_users").update({ metadata: meta }).eq("id", user.id);
 
