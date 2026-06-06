@@ -29,6 +29,8 @@ const FALLBACK_APP_IDS = new Set([
   "loop", "loop-app", "loop-core", "loop-messenger", "messenger",
   "payrald", "dunarald", "gitrald", "rald-inbox", "raldtics", "raldtics-app",
   "gitrald-app", "pay", "duna",
+  // Manilla — music platform
+  "manilla",
 ]);
 
 /**
