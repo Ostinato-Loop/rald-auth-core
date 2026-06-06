@@ -1,8 +1,7 @@
 // RALD Auth Core — Cloudflare Worker
-// Deployed at: auth.rald.cloud | Version: 2.2.0
-// Phase H.1: Identity Graph + Search Architecture
-// Changelog v2.2.0: /search/* (public + relationship search), /graph/* (identity graph, mutual connections, suggestions)
-// Fixed: duplicate buildSessionCookie import in auth.ts
+// Deployed at: auth.rald.cloud | Version: 2.3.0
+// Changelog v2.3.0: Phase H.2 — Privacy Center, Verification Engine, Role Engine, Ecosystem Events
+// Phase 8: Security Hardening — CSP, HSTS, Referrer-Policy headers on all responses
 // LILCKY STUDIO LIMITED
 
 import { Hono } from "hono";
@@ -11,48 +10,49 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { JwtPayload } from "./lib/auth";
 import type { KVNamespace } from "./lib/rate-limit";
 import type { KvSessionStore } from "./lib/session";
-import authRoutes      from "./routes/auth";
-import devicesRoutes   from "./routes/devices";
-import ssoRoutes       from "./routes/sso";
-import clerkRoutes     from "./routes/clerk";
-import provisionRoutes from "./routes/provision";
-import profilesRoutes  from "./routes/profiles";
-import sessionRoutes   from "./routes/session";
-import searchRoutes    from "./routes/search";
-import graphRoutes     from "./routes/graph";
+import authRoutes               from "./routes/auth";
+import devicesRoutes            from "./routes/devices";
+import ssoRoutes                from "./routes/sso";
+import clerkRoutes              from "./routes/clerk";
+import provisionRoutes          from "./routes/provision";
+import profilesRoutes           from "./routes/profiles";
+import sessionRoutes            from "./routes/session";
+import searchRoutes             from "./routes/search";
+import graphRoutes              from "./routes/graph";
+import privacyRoutes            from "./routes/privacy";
+import verificationEngineRoutes from "./routes/verification-engine";
+import rolesRoutes              from "./routes/roles";
 
 export type Bindings = {
-  SUPABASE_URL: string;
+  SUPABASE_URL:              string;
   SUPABASE_SERVICE_ROLE_KEY: string;
-  RALD_JWT_SECRET: string;           // Required — 64-char base64url — NO fallback
-  TERMII_API_KEY: string;
-  TERMII_SENDER_ID: string;
-  RESEND_API_KEY: string;
-  CLERK_SECRET_KEY: string;
-  CLERK_PUBLISHABLE_KEY: string;
-  ENVIRONMENT: string;
-  RATE_LIMIT_KV: KVNamespace;        // rald-auth-rate-limit namespace
-  RALD_SESSION_KV: KvSessionStore;   // rald-session namespace (Phase G.10)
+  RALD_JWT_SECRET:           string;
+  TERMII_API_KEY:            string;
+  TERMII_SENDER_ID:          string;
+  RESEND_API_KEY:            string;
+  CLERK_SECRET_KEY:          string;
+  CLERK_PUBLISHABLE_KEY:     string;
+  ENVIRONMENT:               string;
+  RATE_LIMIT_KV:             KVNamespace;
+  RALD_SESSION_KV:           KvSessionStore;
 };
 
 export type Variables = {
-  db: SupabaseClient;
+  db:    SupabaseClient;
   user?: JwtPayload;
 };
 
-const VERSION = "2.1.0";
+const VERSION = "2.3.0";
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 // ── CORS — full RALD ecosystem ────────────────────────────────────────────────
-// profiles.rald.cloud is the canonical identity hub
-// accounts.rald.cloud: REMOVED (Phase V2)
 app.use("*", cors({
   origin: [
-    // ── Identity hub ──────────────────────────────────────────────────────────
     "https://profiles.rald.cloud",
     "https://credentials.rald.cloud",
-    // ── Core platform ─────────────────────────────────────────────────────────
+    "https://app.rald.cloud",
+    "https://learn.rald.cloud",
     "https://rald.cloud",
     "https://auth.rald.cloud",
     "https://admin.rald.cloud",
@@ -61,7 +61,6 @@ app.use("*", cors({
     "https://sdk.rald.cloud",
     "https://sv.rald.cloud",
     "https://silicon.rald.cloud",
-    // ── Ecosystem apps ────────────────────────────────────────────────────────
     "https://loop.rald.cloud",
     "https://messenger.rald.cloud",
     "https://inbox.rald.cloud",
@@ -71,13 +70,10 @@ app.use("*", cors({
     "https://git.rald.cloud",
     "https://analytics.rald.cloud",
     "https://business.rald.cloud",
-    // ── ostloop.name.ng ───────────────────────────────────────────────────────
     "https://ostloop.name.ng",
-    // ── CF Pages previews ─────────────────────────────────────────────────────
     "https://rald-auth-ui.pages.dev",
     "https://rald-app.pages.dev",
     "https://rald-control-center.pages.dev",
-    // ── Local dev ─────────────────────────────────────────────────────────────
     "http://localhost:5173",
     "http://localhost:3000",
     "http://localhost:4173",
@@ -86,6 +82,23 @@ app.use("*", cors({
   allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   credentials: true,
 }));
+
+// ── Phase 8: Security headers on every response ───────────────────────────────
+app.use("*", async (c, next) => {
+  await next();
+  const res = c.res;
+  res.headers.set("X-Content-Type-Options",    "nosniff");
+  res.headers.set("X-Frame-Options",            "DENY");
+  res.headers.set("X-XSS-Protection",           "1; mode=block");
+  res.headers.set("Referrer-Policy",            "strict-origin-when-cross-origin");
+  res.headers.set("Permissions-Policy",         "camera=(), microphone=(), geolocation=()");
+  res.headers.set("Strict-Transport-Security",  "max-age=31536000; includeSubDomains; preload");
+  res.headers.set("Content-Security-Policy",
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://*.rald.cloud https://*.supabase.co; frame-ancestors 'none'; upgrade-insecure-requests");
+  res.headers.set("X-RALD-Version",    VERSION);
+  res.headers.set("X-RALD-Service",    "auth");
+  res.headers.set("X-RALD-Owner",      "LILCKY STUDIO LIMITED");
+});
 
 // ── Supabase client per request ───────────────────────────────────────────────
 app.use("*", async (c, next) => {
@@ -119,6 +132,7 @@ app.get("/ready", (c) =>
       rate_limit_kv: !!(c.env.RATE_LIMIT_KV),
       session_kv:    !!(c.env.RALD_SESSION_KV),
     },
+    phase: "H.2 — Privacy + Verification + Roles + Security Hardening",
     ...serviceInfo(c),
   })
 );
@@ -129,14 +143,18 @@ app.get("/system/status", (c) =>
     version:      VERSION,
     identity_hub: "profiles.rald.cloud",
     environment:  c.env.ENVIRONMENT ?? "production",
-    secrets: {
-      supabase:      !!c.env.SUPABASE_URL && !!c.env.SUPABASE_SERVICE_ROLE_KEY,
-      jwt:           !!c.env.RALD_JWT_SECRET,
-      termii:        !!c.env.TERMII_API_KEY,
-      resend:        !!c.env.RESEND_API_KEY,
-      clerk_full:    !!c.env.CLERK_SECRET_KEY && !!c.env.CLERK_PUBLISHABLE_KEY,
-      rate_limit_kv: !!(c.env.RATE_LIMIT_KV),
-      session_kv:    !!(c.env.RALD_SESSION_KV),
+    features: {
+      auth:               "✓ login, register, OTP, password reset",
+      sessions:           "✓ create, revoke, revoke-all",
+      devices:            "✓ list, remove, trust",
+      sso:                "✓ exchange, clerk-exchange",
+      profiles:           "✓ me, update, apps, organizations, audit-logs, verification",
+      privacy:            "✓ me, export, permissions, delete-request, cancel-deletion",
+      verification:       "✓ status, apply, withdraw, badge",
+      roles:              "✓ all, me, request, capabilities",
+      search:             "✓ users, related",
+      graph:              "✓ identity graph, mutual connections, suggestions",
+      security_headers:   "✓ HSTS, CSP, X-Frame-Options, Referrer-Policy",
     },
     timestamp: new Date().toISOString(),
   })
@@ -188,18 +206,26 @@ app.get("/system/dependencies", async (c) => {
 });
 
 // ── Routes ────────────────────────────────────────────────────────────────────
-app.route("/auth",      authRoutes);
-app.route("/devices",   devicesRoutes);
-app.route("/sso",       ssoRoutes);
-app.route("/sso",       clerkRoutes);
-app.route("/provision", provisionRoutes);
-app.route("/profiles",  profilesRoutes);
-app.route("/search",    searchRoutes);    // GET /search/users · GET /search/related
-app.route("/graph",     graphRoutes);     // GET /graph/me · GET /graph/mutual/:id · POST /graph/connect
-app.route("/",          sessionRoutes);   // GET /session · GET /me · POST /logout etc.
+app.route("/auth",        authRoutes);
+app.route("/devices",     devicesRoutes);
+app.route("/sso",         ssoRoutes);
+app.route("/sso",         clerkRoutes);
+app.route("/provision",   provisionRoutes);
+app.route("/profiles",    profilesRoutes);
+app.route("/search",      searchRoutes);
+app.route("/graph",       graphRoutes);
+app.route("/privacy",     privacyRoutes);        // Phase 3 — Privacy Center
+app.route("/verify",      verificationEngineRoutes); // Phase 6 — Verification Engine
+app.route("/roles",       rolesRoutes);          // Phase 5 — Role Engine
+app.route("/",            sessionRoutes);        // Phase 1 — Sessions
 
 // ── Root ──────────────────────────────────────────────────────────────────────
-app.get("/", (c) => c.json({ docs: "https://auth.rald.cloud/health", ...serviceInfo(c) }));
+app.get("/", (c) => c.json({
+  docs:  "https://learn.rald.cloud/developers",
+  auth:  "https://auth.rald.cloud/health",
+  learn: "https://learn.rald.cloud",
+  ...serviceInfo(c),
+}));
 app.notFound((c) => c.json({ error: "Not found", path: c.req.path }, 404));
 app.onError((err, c) => {
   console.error("[RALD Auth Error]", err.message ?? err);
@@ -208,15 +234,14 @@ app.onError((err, c) => {
 
 export default {
   async fetch(req: Request, env: Bindings, ctx: ExecutionContext): Promise<Response> {
-    // ── FAIL FAST — service must not start with missing secrets ──────────
     const missing: string[] = [];
-    if (!env.RALD_JWT_SECRET)           missing.push('RALD_JWT_SECRET');
-    if (!env.SUPABASE_URL)              missing.push('SUPABASE_URL');
-    if (!env.SUPABASE_SERVICE_ROLE_KEY) missing.push('SUPABASE_SERVICE_ROLE_KEY');
+    if (!env.RALD_JWT_SECRET)           missing.push("RALD_JWT_SECRET");
+    if (!env.SUPABASE_URL)              missing.push("SUPABASE_URL");
+    if (!env.SUPABASE_SERVICE_ROLE_KEY) missing.push("SUPABASE_SERVICE_ROLE_KEY");
     if (missing.length) {
-      console.error(`[FATAL] rald-auth: missing required secrets: ${missing.join(', ')}`);
-      return new Response(JSON.stringify({ error: 'Service misconfigured', missing, service: 'rald-auth' }), {
-        status: 503, headers: { 'Content-Type': 'application/json' },
+      console.error(`[FATAL] rald-auth: missing required secrets: ${missing.join(", ")}`);
+      return new Response(JSON.stringify({ error: "Service misconfigured", missing, service: "rald-auth" }), {
+        status: 503, headers: { "Content-Type": "application/json" },
       });
     }
     return app.fetch(req, env, ctx);
