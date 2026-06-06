@@ -1,6 +1,7 @@
 // RALD Auth Core — Audit Logging
 // Writes to audit_logs table (best-effort — never throws, never blocks main flow).
 // Phase G.10: Expanded AuditAction types for session management
+// Phase H.2: Added privacy, verification, role, ecosystem action types
 // LILCKY STUDIO LIMITED
 
 import { SupabaseClient } from "@supabase/supabase-js";
@@ -36,7 +37,25 @@ export type AuditAction =
   | "account_deleted"
   // Security
   | "rate_limited"
-  | "redirect_rejected";
+  | "redirect_rejected"
+  // Privacy — Phase H.2
+  | "data_export_requested"
+  | "privacy_permissions_updated"
+  | "account_deletion_requested"
+  | "account_deletion_cancelled"
+  // Verification — Phase H.2
+  | "verification_applied"
+  | "verification_withdrawn"
+  | "verification_approved"
+  | "verification_rejected"
+  // Roles — Phase H.2
+  | "role_granted"
+  | "role_requested"
+  | "role_revoked"
+  // Organizations — Phase H
+  | "organization_created"
+  | "organization_left"
+  | "organization_deleted";
 
 export interface AuditEntry {
   userId?: string | null;
