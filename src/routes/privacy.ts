@@ -234,10 +234,10 @@ privacy.post("/cancel-deletion", authMiddleware, async (c) => {
     return c.json({ error: "No pending deletion request found" }, 404);
   }
 
-  delete meta.deletion_requested_at;
-  delete meta.deletion_scheduled_at;
-  delete meta.deletion_reason;
-  delete meta.status;
+  meta.deletion_requested_at = undefined;
+  meta.deletion_scheduled_at = undefined;
+  meta.deletion_reason = undefined;
+  meta.status = undefined;
 
   await db.from("auth_users").update({ metadata: meta }).eq("id", user.id);
 
