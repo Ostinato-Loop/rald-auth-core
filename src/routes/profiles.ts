@@ -32,7 +32,7 @@ profiles.get("/me", authMiddleware, async (c) => {
   const u = userRes.data?.[0];
   if (!u) return c.json({ error: "User not found" }, 404);
 
-  const meta = (u.metadata as Record<string, string> | null) ?? {};
+  const meta = (u.metadata as Record<string, unknown> | null) ?? {};
   const profile = profileRes.data;
 
   return c.json({
@@ -42,10 +42,10 @@ profiles.get("/me", authMiddleware, async (c) => {
     name:          profile?.display_name ?? u.name ?? null,
     avatar_url:    profile?.avatar_url ?? null,
     bio:           profile?.bio ?? null,
-    phone:         meta.phone ?? null,
+    phone:         (meta["phone"] as string | null) ?? null,
     role:          u.role,
-    email_verified: meta.email_verified === "true" || meta.email_verified === true,
-    phone_verified: meta.phone_verified === "true" || meta.phone_verified === true,
+    email_verified: meta["email_verified"] === "true" || meta["email_verified"] === true,
+    phone_verified: meta["phone_verified"] === "true" || meta["phone_verified"] === true,
     preferences:   profile?.preferences ?? {},
     provisioned_apps: profile?.provisioned_apps ?? [],
     active_products: (appsRes.data ?? []).map((a: { product: string }) => a.product),
