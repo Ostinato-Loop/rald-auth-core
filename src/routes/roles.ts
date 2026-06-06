@@ -133,8 +133,8 @@ roles.get("/me", authMiddleware, async (c) => {
     primary_role:     role,
     role_info:        info,
     product_roles:    productRoles ?? [],
-    additional_roles: (meta["additional_roles"] as string[]) ?? [],
-    verified_as:      (meta["verified_types"] as string[]) ?? [],
+    additional_roles: (meta.additional_roles as string[]) ?? [],
+    verified_as:      (meta.verified_types as string[]) ?? [],
     can_request_roles: RALD_ROLES.filter(
       (r) => !["admin", "operator"].includes(r) && r !== role,
     ),
@@ -179,11 +179,11 @@ roles.post("/request", authMiddleware, async (c) => {
       .single();
 
     const meta: Record<string, unknown> = (userRow?.metadata as Record<string, unknown>) ?? {};
-    const additionalRoles = (meta["additional_roles"] as string[]) ?? [];
+    const additionalRoles = (meta.additional_roles as string[]) ?? [];
 
     if (!additionalRoles.includes(requestedRole)) {
       additionalRoles.push(requestedRole);
-      meta["additional_roles"] = additionalRoles;
+      meta.additional_roles = additionalRoles;
       await db.from("auth_users").update({ metadata: meta }).eq("id", user.id);
     }
 
