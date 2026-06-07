@@ -47,37 +47,46 @@ const VERSION = "2.3.0";
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 // ── CORS — full RALD ecosystem ────────────────────────────────────────────────
+const STATIC_ORIGINS = new Set([
+  "https://profiles.rald.cloud",
+  "https://credentials.rald.cloud",
+  "https://app.rald.cloud",
+  "https://learn.rald.cloud",
+  "https://rald.cloud",
+  "https://auth.rald.cloud",
+  "https://admin.rald.cloud",
+  "https://control.rald.cloud",
+  "https://console.rald.cloud",
+  "https://sdk.rald.cloud",
+  "https://sv.rald.cloud",
+  "https://silicon.rald.cloud",
+  "https://loop.rald.cloud",
+  "https://messenger.rald.cloud",
+  "https://inbox.rald.cloud",
+  "https://pay.rald.cloud",
+  "https://payrald.rald.cloud",
+  "https://duna.rald.cloud",
+  "https://git.rald.cloud",
+  "https://analytics.rald.cloud",
+  "https://business.rald.cloud",
+  "https://ostloop.name.ng",
+  "https://rald-auth-ui.pages.dev",
+  "https://rald-app.pages.dev",
+  "https://rald-control-center.pages.dev",
+  "http://localhost:5173",
+  "http://localhost:3000",
+  "http://localhost:4173",
+]);
+
+function isAllowedOrigin(origin: string): boolean {
+  if (STATIC_ORIGINS.has(origin)) return true;
+  // Replit preview/published domains — covers *.replit.app and *.replit.dev
+  if (/^https:\/\/[a-z0-9-]+\.replit\.(app|dev)$/.test(origin)) return true;
+  return false;
+}
+
 app.use("*", cors({
-  origin: [
-    "https://profiles.rald.cloud",
-    "https://credentials.rald.cloud",
-    "https://app.rald.cloud",
-    "https://learn.rald.cloud",
-    "https://rald.cloud",
-    "https://auth.rald.cloud",
-    "https://admin.rald.cloud",
-    "https://control.rald.cloud",
-    "https://console.rald.cloud",
-    "https://sdk.rald.cloud",
-    "https://sv.rald.cloud",
-    "https://silicon.rald.cloud",
-    "https://loop.rald.cloud",
-    "https://messenger.rald.cloud",
-    "https://inbox.rald.cloud",
-    "https://pay.rald.cloud",
-    "https://payrald.rald.cloud",
-    "https://duna.rald.cloud",
-    "https://git.rald.cloud",
-    "https://analytics.rald.cloud",
-    "https://business.rald.cloud",
-    "https://ostloop.name.ng",
-    "https://rald-auth-ui.pages.dev",
-    "https://rald-app.pages.dev",
-    "https://rald-control-center.pages.dev",
-    "http://localhost:5173",
-    "http://localhost:3000",
-    "http://localhost:4173",
-  ],
+  origin: (origin) => (isAllowedOrigin(origin) ? origin : null),
   allowHeaders: ["Authorization", "Content-Type", "X-Request-ID", "X-App-ID"],
   allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   credentials: true,
@@ -214,10 +223,10 @@ app.route("/provision",   provisionRoutes);
 app.route("/profiles",    profilesRoutes);
 app.route("/search",      searchRoutes);
 app.route("/graph",       graphRoutes);
-app.route("/privacy",     privacyRoutes);        // Phase 3 — Privacy Center
-app.route("/verify",      verificationEngineRoutes); // Phase 6 — Verification Engine
-app.route("/roles",       rolesRoutes);          // Phase 5 — Role Engine
-app.route("/",            sessionRoutes);        // Phase 1 — Sessions
+app.route("/privacy",     privacyRoutes);
+app.route("/verify",      verificationEngineRoutes);
+app.route("/roles",       rolesRoutes);
+app.route("/",            sessionRoutes);
 
 // ── Root ──────────────────────────────────────────────────────────────────────
 app.get("/", (c) => c.json({
