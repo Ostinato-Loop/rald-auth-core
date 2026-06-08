@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   deploy:
-    name: Deploy to Cloudflare Workers
+    name: Deploy to Cloudflare Workers (auth.rald.cloud)
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -46,39 +46,23 @@ jobs:
             if (!d.success) throw new Error('List failed: ' + JSON.stringify(d.errors));
             return d.result;
           }
-
-          async function createNamespace(title) {
-            const r = await fetch(base, { method: 'POST', headers, body: JSON.stringify({ title }) });
-            const d = await r.json();
-            if (!d.success) {
-              if (d.errors?.some(e => e.code === 10014)) {
-                const all = await listNamespaces();
-                const existing = all.find(n => n.title === title);
-                if (existing) return existing.id;
-              }
-              throw new Error('Create failed: ' + JSON.stringify(d.errors));
-            }
-            return d.result.id;
-          }
-
           async function resolveId(title) {
             const all = await listNamespaces();
             const existing = all.find(n => n.title === title);
-            if (existing) { console.log(`  [existing] ${title} → ${existing.id.slice(0,8)}...`); return existing.id; }
-            const id = await createNamespace(title);
-            console.log(`  [created]  ${title} → ${id.slice(0,8)}...`);
-            return id;
+            if (existing) { console.log(`  [existing] ${title}`); return existing.id; }
+            const r = await fetch(base, { method: 'POST', headers, body: JSON.stringify({ title }) });
+            const d = await r.json();
+            if (!d.success) { const retry = (await listNamespaces()).find(n => n.title === title); if (retry) return retry.id; throw new Error(JSON.stringify(d.errors)); }
+            console.log(`  [created]  ${title}`); return d.result.id;
           }
-
           (async () => {
-            console.log('Resolving KV namespace IDs...');
             const rateLimitId = await resolveId('rald-auth-rate-limit');
             const sessionKvId = await resolveId('rald-session');
             let toml = fs.readFileSync('wrangler.toml', 'utf8');
             toml = toml.replace('REPLACE_WITH_RATE_LIMIT_KV_NAMESPACE_ID', rateLimitId);
             toml = toml.replace('REPLACE_WITH_RALD_SESSION_KV_NAMESPACE_ID', sessionKvId);
             fs.writeFileSync('wrangler.toml', toml);
-            console.log('wrangler.toml patched with real KV namespace IDs.');
+            console.log('wrangler.toml patched.');
           })();
           JSEOF
 
@@ -88,14 +72,68 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
-      - name: Push RALD_JWT_SECRET to rald-auth worker
+      # ── Push ALL required secrets ────────────────────────────────
+      - name: Push RALD_JWT_SECRET
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           RALD_JWT_SECRET: ${{ secrets.RALD_JWT_SECRET }}
         run: |
-          if [ -z "$RALD_JWT_SECRET" ]; then
-            echo "FATAL: RALD_JWT_SECRET not set in GitHub secrets — add it and redeploy" && exit 1
-          fi
+          if [ -z "$RALD_JWT_SECRET" ]; then echo "FATAL: RALD_JWT_SECRET not set" && exit 1; fi
           echo "$RALD_JWT_SECRET" | npx wrangler secret put RALD_JWT_SECRET --name rald-auth
-          echo "RALD_JWT_SECRET pushed to rald-auth worker"
+          echo "RALD_JWT_SECRET ✓"
+
+      - name: Push SUPABASE_SERVICE_ROLE_KEY
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then echo "FATAL: SUPABASE_SERVICE_ROLE_KEY not set" && exit 1; fi
+          echo "$SUPABASE_SERVICE_ROLE_KEY" | npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY --name rald-auth
+          echo "SUPABASE_SERVICE_ROLE_KEY ✓"
+
+      - name: Push TERMII_API_KEY
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          TERMII_API_KEY: ${{ secrets.TERMII_API_KEY }}
+        run: |
+          if [ -z "$TERMII_API_KEY" ]; then echo "WARNING: TERMII_API_KEY not set — OTP unavailable" && exit 0; fi
+          echo "$TERMII_API_KEY" | npx wrangler secret put TERMII_API_KEY --name rald-auth
+          echo "TERMII_API_KEY ✓"
+
+      - name: Push TERMII_SENDER_ID
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          TERMII_SENDER_ID: ${{ secrets.TERMII_SENDER_ID }}
+        run: |
+          if [ -z "$TERMII_SENDER_ID" ]; then echo "WARNING: TERMII_SENDER_ID not set — skipping" && exit 0; fi
+          echo "$TERMII_SENDER_ID" | npx wrangler secret put TERMII_SENDER_ID --name rald-auth
+          echo "TERMII_SENDER_ID ✓"
+
+      - name: Push RESEND_API_KEY
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+        run: |
+          if [ -z "$RESEND_API_KEY" ]; then echo "WARNING: RESEND_API_KEY not set — email auth unavailable" && exit 0; fi
+          echo "$RESEND_API_KEY" | npx wrangler secret put RESEND_API_KEY --name rald-auth
+          echo "RESEND_API_KEY ✓"
+
+      # ── Post-deploy smoke test ───────────────────────────────────
+      - name: Smoke test auth.rald.cloud/health
+        run: |
+          sleep 5
+          STATUS=$(curl -sf -o /dev/null -w "%{http_code}" https://auth.rald.cloud/health || echo "000")
+          if [ "$STATUS" != "200" ]; then
+            echo "FATAL: post-deploy health check failed (HTTP $STATUS)" && exit 1
+          fi
+          echo "SMOKE TEST PASSED: /health returned HTTP $STATUS"
+
+      - name: Record deployment audit
+        if: always()
+        run: |
+          echo "AUDIT: service=rald-auth commit=${{ github.sha }} actor=${{ github.actor }} ts=$(date -u +%Y-%m-%dT%H:%M:%SZ) status=${{ job.status }}"
