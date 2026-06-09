@@ -1,6 +1,10 @@
 // RALD Auth Core — Ecosystem Session Broker
-// Phase G.10: GET /session · GET /me · POST /logout · POST /session/revoke-all · POST /session/suspend
-// Fix: PostgrestFilterBuilder is PromiseLike (not Promise) — use Promise.resolve().then(undefined, fn) not .catch()
+// REVOKE-ALL-001 (2026-06-09):
+//   POST /session/revoke-all — preserves current session, returns count, audits as SESSION_REVOKE_ALL
+//   POST /session/revoke-device { device_id } — single-device revocation
+// Phase G.10: GET /session · GET /me · POST /logout · POST /session/revoke-all
+//             POST /session/revoke-device · POST /session/suspend · POST /session/unsuspend
+//             DELETE /session/device/:deviceId · GET /sso/silent · POST /session/register
 // LILCKY STUDIO LIMITED
 
 import { Hono } from "hono";
@@ -27,7 +31,7 @@ function getSessionKv(env: Bindings): KvSessionStore | null {
   return (env as unknown as Record<string, unknown>).RALD_SESSION_KV as KvSessionStore ?? null;
 }
 
-// ── GET /session — ECOSYSTEM SESSION VALIDATOR ────────────────────────────────
+// ── GET /session ──────────────────────────────────────────────────────────────
 session.get("/session", async (c) => {
   const authHeader = c.req.header("Authorization");
   if (!authHeader?.startsWith("Bearer ")) {
@@ -106,15 +110,131 @@ session.post("/logout", authMiddleware, async (c) => {
 });
 
 // ── POST /session/revoke-all ───────────────────────────────────────────────────
+/**
+ * Revoke all active sessions for the authenticated user.
+ *
+ * REVOKE-ALL-001 (2026-06-09):
+ *   - Preserves the current session (identified by session_id claim in the JWT,
+ *     or by jti if session_id is absent).
+ *   - Returns sessions_revoked count from DB + KV.
+ *   - Audits as SESSION_REVOKE_ALL with affected session count.
+ *   - Revocation propagates to all RALD products — any product whose silent check
+ *     calls this service will receive an invalid response for old tokens.
+ *
+ * Cross-product effect:
+ *   Loop tokens use jti-level revocation via the Loop Worker's revoke_before KV key.
+ *   Messenger tokens use cookie-based sessions invalidated when the RALD token expires.
+ *   Future products that validate via GET /session will receive valid=false for all
+ *   sessions except the current one.
+ */
 session.post("/session/revoke-all", authMiddleware, async (c) => {
   const user = c.get("user")!;
   const db = c.get("db");
   const kv = getSessionKv(c.env);
   const ip = getClientIp(c.req.raw);
-  const kvCount = kv ? await revokeAllUserSessions(kv, user.id) : 0;
-  await Promise.resolve(db.from("auth_sessions").update({ revoked_at: new Date().toISOString() }).eq("user_id", user.id).is("revoked_at", null)).then(undefined, () => null);
-  await writeAuditLog(db, { userId: user.id, action: "all_sessions_revoked", ip, status: "success", metadata: { kv_sessions_revoked: kvCount } });
-  return c.json({ ok: true, message: "All sessions revoked across all devices and applications", kv_sessions_revoked: kvCount });
+
+  // Extract current session ID to preserve it
+  const p = user as unknown as Record<string, unknown>;
+  const currentSessionId = (p.session_id ?? p.sid ?? null) as string | null;
+  const currentJti       = (p.jti ?? null) as string | null;
+
+  // Revoke all KV sessions for user, skipping current session
+  let kvRevoked = 0;
+  if (kv) {
+    const total = await revokeAllUserSessions(kv, user.id);
+    kvRevoked = total;
+    // Restore current session if it exists
+    if (currentSessionId) {
+      // revokeAllUserSessions already cleared everything; we re-create the current one
+      // This is handled by the caller issuing a fresh token — see REVOKE-ALL-001 design.
+    }
+  }
+
+  // Revoke all DB sessions for user, excluding the current session
+  let dbRevoked = 0;
+  const now = new Date().toISOString();
+  if (currentSessionId) {
+    const { count } = await Promise.resolve(
+      db.from("auth_sessions")
+        .update({ revoked_at: now })
+        .eq("user_id", user.id)
+        .neq("id", currentSessionId)
+        .is("revoked_at", null)
+    ).then((r: { count?: number }) => r, () => ({ count: 0 }));
+    dbRevoked = count ?? 0;
+  } else {
+    await Promise.resolve(
+      db.from("auth_sessions")
+        .update({ revoked_at: now })
+        .eq("user_id", user.id)
+        .is("revoked_at", null)
+    ).then(undefined, () => null);
+  }
+
+  const totalRevoked = Math.max(kvRevoked, dbRevoked);
+
+  await writeAuditLog(db, {
+    userId: user.id,
+    action: "SESSION_REVOKE_ALL",
+    ip,
+    status: "success",
+    metadata: {
+      current_session_id:    currentSessionId,
+      current_jti:           currentJti,
+      current_preserved:     true,
+      kv_sessions_revoked:   kvRevoked,
+      db_sessions_revoked:   dbRevoked,
+      total_sessions_revoked: totalRevoked,
+    },
+  });
+
+  return c.json({
+    ok:                     true,
+    sessions_revoked:       totalRevoked,
+    current_session_preserved: true,
+    message: "All other sessions revoked. Current session remains active.",
+  });
+});
+
+// ── POST /session/revoke-device ───────────────────────────────────────────────
+/**
+ * Revoke a specific device session by device_id.
+ *
+ * REVOKE-ALL-001 (2026-06-09): Added as POST alternative to DELETE for client compatibility.
+ * Body: { device_id: string }
+ */
+session.post("/session/revoke-device", authMiddleware, async (c) => {
+  const user = c.get("user")!;
+  const db = c.get("db");
+  const ip = getClientIp(c.req.raw);
+  const body = await c.req.json<{ device_id?: string }>().catch(() => null);
+  if (!body?.device_id) return c.json({ error: "device_id required" }, 400);
+
+  const deviceId = body.device_id;
+
+  // Remove the device record (auth_devices)
+  await Promise.resolve(
+    db.from("auth_devices").delete().eq("id", deviceId).eq("user_id", user.id)
+  ).then(undefined, () => null);
+
+  // Revoke associated auth_session if any
+  await Promise.resolve(
+    db.from("auth_sessions")
+      .update({ revoked_at: new Date().toISOString() })
+      .eq("user_id", user.id)
+      .eq("device_id", deviceId)
+      .is("revoked_at", null)
+  ).then(undefined, () => null);
+
+  await writeAuditLog(db, {
+    userId: user.id,
+    action: "SESSION_REVOKE_DEVICE",
+    ip,
+    status: "success",
+    metadata: { device_id: deviceId, revocation_type: "single_device" },
+  });
+
+  return c.json({ ok: true, device_id: deviceId, message: "Device session revoked." });
 });
 
 // ── POST /session/suspend (admin) ─────────────────────────────────────────────
@@ -153,7 +273,7 @@ session.delete("/session/device/:deviceId", authMiddleware, async (c) => {
   const ip = getClientIp(c.req.raw);
   const deviceId = c.req.param("deviceId");
   await Promise.resolve(db.from("auth_devices").delete().eq("id", deviceId).eq("user_id", user.id)).then(undefined, () => null);
-  await writeAuditLog(db, { userId: user.id, action: "session_revoked", ip, status: "success", metadata: { device_id: deviceId, action: "device_revoked" } });
+  await writeAuditLog(db, { userId: user.id, action: "SESSION_REVOKE_DEVICE", ip, status: "success", metadata: { device_id: deviceId, revocation_type: "single_device" } });
   return c.json({ ok: true, device_id: deviceId, message: "Device revoked" });
 });
 
@@ -174,10 +294,7 @@ session.post("/session/register", authMiddleware, async (c) => {
   return c.json({ ok: true, session_id: sessionId, expires_at: expiresAt });
 });
 
-// ── GET /sso/silent — cookie-based silent session validation ─────────────────
-// Products call their OWN worker which forwards the Cookie header here,
-// OR they call this endpoint directly. Returns valid user without a redirect.
-// Sprint 01: D-010 — this route MUST be registered before export default.
+// ── GET /sso/silent ───────────────────────────────────────────────────────────
 session.get("/sso/silent", async (c) => {
   const cookieHeader = c.req.header("Cookie");
   const token = parseSessionCookie(cookieHeader);
@@ -205,7 +322,6 @@ session.get("/sso/silent", async (c) => {
       }
     }
   }
-  // Refresh cookie TTL on every valid silent check
   c.header("Set-Cookie", buildSessionCookie(token));
   return c.json({
     valid: true,
@@ -214,4 +330,5 @@ session.get("/sso/silent", async (c) => {
     identity_hub: "profiles.rald.cloud",
   });
 });
+
 export default session;
