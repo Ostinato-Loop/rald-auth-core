@@ -29,7 +29,7 @@ function uint8ToBase64url(bytes: Uint8Array): string {
   return btoa(bStr).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
 }
 
-function base64urlToUint8(str: string): Uint8Array {
+function base64urlToUint8(str: string): Uint8Array<ArrayBuffer> {
   const b64 = str.replace(/-/g, "+").replace(/_/g, "/");
   const bStr = atob(b64);
   const out = new Uint8Array(bStr.length);
