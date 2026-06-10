@@ -6,6 +6,7 @@
 //   1. User submits desired @username → reserved + pending_user_id returned
 //   2. Caller sends OTP via /auth/send-otp or /auth/send-login-email-otp
 //   3. Caller hits /complete with pending_user_id + OTP → session issued
+//      → welcome email sent via Resend (sendWelcomeEmail)
 //
 // Security:
 //   - IP rate limiting on registration (10/hour) and completion (10/hour)
@@ -20,7 +21,7 @@ import type { Bindings, Variables } from "../index";
 import { checkRateLimit, getClientIp, rateLimitResponse } from "../lib/rate-limit";
 import { signJwt } from "../lib/auth";
 import { buildSessionCookie } from "../lib/cookie";
-import { verifySmsOtp, verifyOtpCode } from "../lib/otp";
+import { verifySmsOtp, verifyOtpCode, sendWelcomeEmail } from "../lib/otp";
 import { writeAuditLog } from "../lib/audit";
 
 const registerUsername = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -182,6 +183,7 @@ registerUsername.post("/", async (c) => {
 
 // ── POST /auth/register-username/complete ─────────────────────────────────────
 // Verifies OTP for a pending V2 username registration, then issues a session.
+// On success: sends a welcome email to the verified address (non-blocking).
 registerUsername.post("/complete", async (c) => {
   const ip = getClientIp(c.req.raw);
   const db = c.get("db");
@@ -240,6 +242,9 @@ registerUsername.post("/complete", async (c) => {
   const userUsername   = user.username as string;
   const userRaldId     = user.rald_internal_id as string;
   const userName       = user.name as string;
+
+  // Tracks the verified email address for the welcome email
+  let verifiedEmail: string | null = null;
 
   // ── Verify OTP ──────────────────────────────────────────────────────────────
   if (method === "sms") {
@@ -328,6 +333,8 @@ registerUsername.post("/complete", async (c) => {
       userId, action: "otp_verified", ip, status: "success",
       metadata: { method: "email", stage: "complete-v2" },
     });
+
+    verifiedEmail = cleanEmail;
   }
 
   // ── Issue 30-day session ────────────────────────────────────────────────────
@@ -351,6 +358,14 @@ registerUsername.post("/complete", async (c) => {
   });
 
   c.header("Set-Cookie", buildSessionCookie(token));
+
+  // ── Send welcome email (non-blocking — failure must not break registration) ──
+  // Only sent when we have a verified email address (email-method registrations).
+  if (verifiedEmail && c.env.RESEND_API_KEY) {
+    sendWelcomeEmail(verifiedEmail, userUsername, c.env.RESEND_API_KEY).catch(err => {
+      console.error("[register-username/complete] welcome email failed:", String(err));
+    });
+  }
 
   return c.json({
     ok:    true,
