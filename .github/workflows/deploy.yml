@@ -73,6 +73,14 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
       # ── Push ALL required secrets ────────────────────────────────
+
+      - name: Push SUPABASE_URL
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        run: |
+          if [ -n "$SUPABASE_URL" ]; then echo "$SUPABASE_URL" | npx wrangler secret put SUPABASE_URL --name rald-auth && echo 'SUPABASE_URL ✓'; else echo 'WARNING: SUPABASE_URL not set'; fi
       - name: Push RALD_JWT_SECRET
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
