@@ -54,7 +54,20 @@ export type AuditAction =
   | "role_granted"
   | "role_requested"
   | "role_revoked"
-  // Organizations — Phase H
+  // V2 Username Identity — Phase V2
+  | "username_claimed"
+  | "username_released"
+  | "username_admin_change"
+  // Recovery Codes — Phase V2
+  | "recovery_codes_generated"
+  | "recovery_code_used"
+  | "recovery_code_failed"
+  // Workspaces — Phase V2
+  | "workspace_created"
+  | "workspace_deleted"
+  | "workspace_member_added"
+  | "workspace_member_removed"
+    // Organizations — Phase H
   | "organization_created"
   | "organization_left"
   | "organization_deleted";
