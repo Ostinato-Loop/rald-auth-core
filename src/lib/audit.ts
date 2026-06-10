@@ -20,6 +20,8 @@ export type AuditAction =
   // Sessions
   | "session_created"
   | "session_revoked"
+  | "SESSION_REVOKE_ALL"
+  | "SESSION_REVOKE_DEVICE"
   | "all_sessions_revoked"
   | "forced_logout"
   // Devices
