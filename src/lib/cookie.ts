@@ -4,7 +4,7 @@
 
 const COOKIE_NAME   = "rald_session";
 const COOKIE_DOMAIN = ".rald.cloud";
-const SESSION_TTL_S = 86400; // 24h — matches JWT TTL
+const SESSION_TTL_S = 2_592_000; // 30 days — sliding window; refreshed by /auth/silent on every app open
 
 /** Build Set-Cookie header value for the RALD ecosystem session cookie. */
 export function buildSessionCookie(token: string, ttlSeconds = SESSION_TTL_S): string {
