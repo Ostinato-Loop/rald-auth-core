@@ -32,7 +32,8 @@ function uint8ToBase64url(bytes: Uint8Array): string {
 function base64urlToUint8(str: string): Uint8Array<ArrayBuffer> {
   const b64 = str.replace(/-/g, "+").replace(/_/g, "/");
   const bStr = atob(b64);
-  const out = new Uint8Array(bStr.length);
+  const buf = new ArrayBuffer(bStr.length);
+  const out = new Uint8Array(buf);
   for (let i = 0; i < bStr.length; i++) out[i] = bStr.charCodeAt(i);
   return out;
 }
