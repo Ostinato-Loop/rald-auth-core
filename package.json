@@ -1,6 +1,6 @@
 {
   "name": "@rald/auth-core",
-  "version": "1.0.0",
+  "version": "2.6.0",
   "private": true,
   "description": "RALD Auth Core — standalone Cloudflare Worker for the RALD ecosystem",
   "scripts": {
@@ -12,6 +12,7 @@
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
+    "@simplewebauthn/server": "^13.0.0",
     "@supabase/supabase-js": "^2.47.10",
     "hono": "^4.7.5"
   },

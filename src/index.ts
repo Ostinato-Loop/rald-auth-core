@@ -1,5 +1,6 @@
 // RALD Auth Core — Cloudflare Worker
 // Deployed at: auth.rald.cloud | Version: 2.3.0
+// Changelog v2.6.0: QR Code Login + WebAuthn/Face Auth end-to-end
 // Changelog v2.5.0: V2 Username-First Identity — /username, /auth/register-username, /recovery
 // Changelog v2.3.0: Phase H.2 — Privacy Center, Verification Engine, Role Engine, Ecosystem Events
 // Phase 8: Security Hardening — CSP, HSTS, Referrer-Policy headers on all responses
@@ -26,6 +27,8 @@ import rolesRoutes              from "./routes/roles";
 import usernameRoutes           from "./routes/username";
 import registerUsernameRoute    from "./routes/register-username";
 import recoveryRoutes           from "./routes/recovery";
+import qrRoutes                 from "./routes/qr";
+import webauthnRoutes           from "./routes/webauthn";
 import metricsRoutes            from "./routes/metrics";
 
 export type Bindings = {
@@ -47,7 +50,7 @@ export type Variables = {
   user?: JwtPayload;
 };
 
-const VERSION = "2.5.0";
+const VERSION = "2.6.0";
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -234,6 +237,8 @@ app.route("/roles",       rolesRoutes);
 app.route("/username",     usernameRoutes);
 app.route("/auth/register-username", registerUsernameRoute);
 app.route("/recovery",    recoveryRoutes);
+app.route("/auth/qr",       qrRoutes);
+app.route("/auth/webauthn", webauthnRoutes);
 app.route("/admin/metrics", metricsRoutes);
 app.route("/",            sessionRoutes);
 
