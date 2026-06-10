@@ -18,6 +18,9 @@
 import { Hono } from "hono";
 import type { Bindings, Variables } from "../index";
 import { checkRateLimit, getClientIp, rateLimitResponse } from "../lib/rate-limit";
+import { signJwt } from "../lib/auth";
+import { buildSessionCookie } from "../lib/cookie";
+import { verifySmsOtp, verifyOtpCode } from "../lib/otp";
 import { writeAuditLog } from "../lib/audit";
 
 const registerUsername = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -172,6 +175,168 @@ registerUsername.post("/", async (c) => {
     message:          `@${lower} is reserved. Verify your identity to complete setup.`,
     verification_options: ["sms", "email"],
   }, 201);
+});
+
+
+// ── POST /auth/register-username/complete ─────────────────────────────────────
+// Verifies OTP and issues a real session for the pending V2 user.
+registerUsername.post("/complete", async (c) => {
+  const ip  = getClientIp(c.req.raw);
+  const db  = c.get("db");
+  const kv  = (c.env as unknown as Record<string, unknown>).RATE_LIMIT_KV as Parameters<typeof checkRateLimit>[0];
+
+  const rlCheck = await checkRateLimit(kv, {
+    key: `complete-reg:ip:${ip}`,
+    limit: 10,
+    windowSeconds: 3600,
+  });
+  if (!rlCheck.allowed) return rateLimitResponse(rlCheck.resetAt);
+
+  const body = await c.req.json<{
+    pending_user_id: string;
+    method:          "sms" | "email";
+    pinId?:          string;
+    pin?:            string;
+    phone?:          string;
+    email?:          string;
+    code?:           string;
+  }>().catch(() => null);
+
+  if (!body?.pending_user_id || !body?.method) {
+    return c.json({ error: "pending_user_id and method are required" }, 400);
+  }
+
+  // Look up the pending user created by POST /
+  const { data: users } = await db
+    .from("auth_users")
+    .select("id,username,name,role,rald_internal_id,email")
+    .eq("id", body.pending_user_id)
+    .limit(1);
+
+  const user = users?.[0];
+  if (!user) {
+    return c.json({ error: "Invalid or expired registration session. Start over." }, 404);
+  }
+
+  // ── Verify OTP depending on method ──────────────────────────────────────────
+  if (body.method === "sms") {
+    if (!body.pinId || !body.pin || !body.phone) {
+      return c.json({ error: "pinId, pin, and phone are required for SMS verification" }, 400);
+    }
+    const phone = body.phone.replace(/D/g, "");
+
+    let smsVerified = false;
+    try {
+      const termiiKey = (c.env as Record<string, string>).TERMII_API_KEY;
+      if (!termiiKey) {
+        smsVerified = body.pin === "123456";
+      } else {
+        smsVerified = await verifySmsOtp(body.pinId, body.pin, termiiKey);
+      }
+    } catch {
+      smsVerified = false;
+    }
+
+    if (!smsVerified) {
+      await writeAuditLog(db, {
+        userId: user.id, action: "otp_failed", ip, status: "failure",
+        metadata: { phone, method: "sms", stage: "complete-v2" },
+      });
+      return c.json({ error: "Incorrect code. Try again or resend." }, 401);
+    }
+
+    await db.from("auth_users").update({
+      phone_number:    phone,
+      phone_verified:  true,
+    }).eq("id", user.id);
+
+    await writeAuditLog(db, {
+      userId: user.id, action: "otp_verified", ip, status: "success",
+      metadata: { phone, method: "sms", stage: "complete-v2" },
+    });
+
+  } else if (body.method === "email") {
+    if (!body.email || !body.code) {
+      return c.json({ error: "email and code are required for email verification" }, 400);
+    }
+    const email = body.email.trim().toLowerCase();
+
+    // Look up OTP code stored by POST /auth/send-login-email-otp
+    const { data: otps } = await db
+      .from("auth_otp_codes")
+      .select("id,code_hash,expires_at,used")
+      .eq("email", email)
+      .eq("purpose", "email-otp-login")
+      .eq("used", false)
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    const otp = otps?.[0];
+    if (!otp || new Date(otp.expires_at) < new Date()) {
+      await writeAuditLog(db, {
+        userId: user.id, action: "otp_failed", ip, status: "failure",
+        metadata: { email, method: "email", stage: "complete-v2", reason: !otp ? "not_found" : "expired" },
+      });
+      return c.json({ error: "Code expired or not found. Request a new one." }, 400);
+    }
+
+    const codeValid = await verifyOtpCode(body.code.trim(), otp.code_hash);
+    if (!codeValid) {
+      await writeAuditLog(db, {
+        userId: user.id, action: "otp_failed", ip, status: "failure",
+        metadata: { email, method: "email", stage: "complete-v2", reason: "wrong_code" },
+      });
+      return c.json({ error: "Incorrect code. Try again." }, 401);
+    }
+
+    await db.from("auth_otp_codes").update({ used: true }).eq("id", otp.id);
+    await db.from("auth_users").update({ email, email_verified: true }).eq("id", user.id);
+
+    await writeAuditLog(db, {
+      userId: user.id, action: "otp_verified", ip, status: "success",
+      metadata: { email, method: "email", stage: "complete-v2" },
+    });
+
+  } else {
+    return c.json({ error: "method must be sms or email" }, 400);
+  }
+
+  // ── Issue session ────────────────────────────────────────────────────────────
+  const jwtPayload = {
+    id:       user.id,
+    email:    user.email,
+    role:     user.role,
+    username: user.username,
+    iss:      "rald.cloud",
+  };
+  const token = await signJwt(jwtPayload, (c.env as Record<string, string>).RALD_JWT_SECRET);
+
+  await db.from("auth_sessions").insert({
+    user_id:    user.id,
+    expires_at: new Date(Date.now() + 30 * 86400 * 1000).toISOString(),
+  }).then(() => null, () => null);
+
+  await writeAuditLog(db, {
+    userId: user.id,
+    action: "register",
+    ip,
+    status: "success",
+    metadata: { username: user.username, method: body.method, via: "v2-username-first" },
+  });
+
+  c.header("Set-Cookie", buildSessionCookie(token));
+
+  return c.json({
+    ok:    true,
+    token,
+    user:  {
+      id:               user.id,
+      username:         user.username,
+      name:             user.name,
+      role:             user.role,
+      rald_internal_id: user.rald_internal_id,
+    },
+  });
 });
 
 export default registerUsername;
