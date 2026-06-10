@@ -30,6 +30,7 @@ import recoveryRoutes           from "./routes/recovery";
 import qrRoutes                 from "./routes/qr";
 import webauthnRoutes           from "./routes/webauthn";
 import metricsRoutes            from "./routes/metrics";
+import loginUsernameRoute        from "./routes/login-username";
 
 export type Bindings = {
   SUPABASE_URL:              string;
@@ -236,6 +237,7 @@ app.route("/verify",      verificationEngineRoutes);
 app.route("/roles",       rolesRoutes);
 app.route("/username",     usernameRoutes);
 app.route("/auth/register-username", registerUsernameRoute);
+app.route("/auth/login-username",  loginUsernameRoute);
 app.route("/recovery",    recoveryRoutes);
 app.route("/auth/qr",       qrRoutes);
 app.route("/auth/webauthn", webauthnRoutes);
