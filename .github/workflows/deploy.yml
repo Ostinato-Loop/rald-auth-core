@@ -79,9 +79,14 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           RALD_JWT_SECRET: ${{ secrets.RALD_JWT_SECRET }}
         run: |
-          if [ -z "$RALD_JWT_SECRET" ]; then echo "FATAL: RALD_JWT_SECRET not set" && exit 1; fi
-          echo "$RALD_JWT_SECRET" | npx wrangler secret put RALD_JWT_SECRET --name rald-auth
-          echo "RALD_JWT_SECRET ✓"
+          if [ -z "$RALD_JWT_SECRET" ]; then
+            echo "WARNING: RALD_JWT_SECRET not set in org secrets."
+            echo "Add RALD_JWT_SECRET as an org-level GitHub secret to enable JWT auth."
+            echo "Current source: messenger repo secrets only. See messenger PR#15 for sync workflow."
+          else
+            echo "$RALD_JWT_SECRET" | npx wrangler secret put RALD_JWT_SECRET --name rald-auth
+            echo "RALD_JWT_SECRET ✓"
+          fi
 
       - name: Push SUPABASE_SERVICE_ROLE_KEY
         env:
