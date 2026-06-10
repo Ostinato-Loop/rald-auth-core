@@ -1,6 +1,6 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.4.16/schema.json",
-  "assist": {
+  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  "organizeImports": {
     "enabled": false
   },
   "linter": {
@@ -27,10 +27,10 @@
     "enabled": false
   },
   "files": {
-    "excludes": [
-      "node_modules/**",
-      "dist/**",
-      ".wrangler/**",
+    "ignore": [
+      "node_modules",
+      "dist",
+      ".wrangler",
       "*.lock"
     ]
   }
