@@ -616,4 +616,24 @@ auth.delete("/sessions", authMiddleware, async (c) => {
   return c.json({ message: "All sessions revoked" });
 });
 
+
+/**
+ * POST /auth/refresh
+ * Proactively re-issue a JWT for an authenticated caller.
+ *
+ * Header:  Authorization: Bearer <valid_token>
+ * Returns: { access_token: string, user: JwtPayload }
+ *
+ * H-1 HARDENING (2026-06-10): Ecosystem apps call this to extend sessions
+ * before expiry. The Bearer token must still be valid (not expired).
+ */
+auth.post("/refresh", authMiddleware, async (c) => {
+  const user  = c.get("user")!;
+  const token = await signJwt(
+    { id: user.id, email: user.email, role: user.role },
+    c.env.RALD_JWT_SECRET,
+  );
+  return c.json({ access_token: token, user });
+});
+
 export default auth;
