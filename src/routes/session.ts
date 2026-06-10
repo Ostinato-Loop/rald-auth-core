@@ -160,7 +160,7 @@ session.post("/session/revoke-all", authMiddleware, async (c) => {
         .eq("user_id", user.id)
         .neq("id", currentSessionId)
         .is("revoked_at", null)
-    ).then((r: { count?: number }) => r, () => ({ count: 0 }));
+    ).then((r) => ({ count: r.count ?? 0 }), () => ({ count: 0 }));
     dbRevoked = count ?? 0;
   } else {
     await Promise.resolve(
