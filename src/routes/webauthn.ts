@@ -25,7 +25,7 @@ import { getClientIp } from "../lib/rate-limit";
 // Cloudflare Workers does not have Buffer — use btoa/atob instead
 function uint8ToBase64url(bytes: Uint8Array): string {
   let bStr = "";
-  for (let i = 0; i < bytes.byteLength; i++) bStr += String.fromCharCode(bytes[i]);
+  for (let i = 0; i < bytes.byteLength; i++) bStr += String.fromCharCode(bytes[i]!);
   return btoa(bStr).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
 }
 

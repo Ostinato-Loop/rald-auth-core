@@ -78,7 +78,7 @@ qr.post("/generate", async (c) => {
 
 // ── Poll status ───────────────────────────────────────────────────────────────
 qr.get("/status/:token", async (c) => {
-  const token = c.req.param("token");
+  const token = c.req.param("token") ?? "";
   const kv = c.env.RATE_LIMIT_KV;
 
   const raw = await kv.get(`qr:session:${token}`);
@@ -103,7 +103,7 @@ qr.get("/status/:token", async (c) => {
 
 // ── Scan (mobile marks scanned) ───────────────────────────────────────────────
 qr.post("/scan/:token", authMiddleware, async (c) => {
-  const token = c.req.param("token");
+  const token = c.req.param("token") ?? "";
   const user = c.get("user")!;
   const kv = c.env.RATE_LIMIT_KV;
 
@@ -131,7 +131,7 @@ qr.post("/scan/:token", authMiddleware, async (c) => {
 
 // ── Approve ───────────────────────────────────────────────────────────────────
 qr.post("/approve/:token", authMiddleware, async (c) => {
-  const token = c.req.param("token");
+  const token = c.req.param("token") ?? "";
   const user = c.get("user")!;
   const db = c.get("db");
   const kv = c.env.RATE_LIMIT_KV;
@@ -201,7 +201,7 @@ qr.post("/approve/:token", authMiddleware, async (c) => {
 
 // ── Reject ────────────────────────────────────────────────────────────────────
 qr.post("/reject/:token", authMiddleware, async (c) => {
-  const token = c.req.param("token");
+  const token = c.req.param("token") ?? "";
   const user = c.get("user")!;
   const kv = c.env.RATE_LIMIT_KV;
 
