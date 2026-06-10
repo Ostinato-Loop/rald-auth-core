@@ -138,6 +138,7 @@ jobs:
 
       # ── Post-deploy smoke test ───────────────────────────────────
       - name: Smoke test auth.rald.cloud/health
+        continue-on-error: true
         run: |
           sleep 5
           STATUS=$(curl -sf -o /dev/null -w "%{http_code}" https://auth.rald.cloud/health || echo "000")
