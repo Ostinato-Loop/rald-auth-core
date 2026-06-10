@@ -23,7 +23,7 @@ import { writeAuditLog } from "../lib/audit";
 import { getClientIp } from "../lib/rate-limit";
 
 // Cloudflare Workers does not have Buffer — use btoa/atob instead
-function uint8ToBase64url(bytes: Uint8Array): string {
+function uint8ToBase64url(bytes: Uint8Array<ArrayBufferLike>): string {
   let bStr = "";
   for (let i = 0; i < bytes.byteLength; i++) bStr += String.fromCharCode(bytes[i]!);
   return btoa(bStr).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
@@ -67,7 +67,7 @@ webauthn.post("/register/options", authMiddleware, async (c) => {
     .select("credential_id, transports")
     .eq("user_id", user.id);
 
-  const userIdBytes = new TextEncoder().encode(user.id);
+  const userIdBytes = new TextEncoder().encode(user.id) as Uint8Array<ArrayBuffer>;
 
   const options = await generateRegistrationOptions({
     rpName:      RP_NAME,
