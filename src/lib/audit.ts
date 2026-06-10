@@ -2,6 +2,7 @@
 // Writes to audit_logs table (best-effort — never throws, never blocks main flow).
 // Phase G.10: Expanded AuditAction types for session management
 // Phase H.2: Added privacy, verification, role, ecosystem action types
+// Phase V2.1: Added QR login and WebAuthn audit actions
 // LILCKY STUDIO LIMITED
 
 import { SupabaseClient } from "@supabase/supabase-js";
@@ -62,18 +63,25 @@ export type AuditAction =
   | "recovery_codes_generated"
   | "recovery_code_used"
   | "recovery_code_failed"
+  // QR Login — Phase V2.1
+  | "qr_login_approved"
+  // WebAuthn / Biometric — Phase V2.1
+  | "webauthn_credential_registered"
+  | "webauthn_login_failed"
+  | "webauthn_login_success"
   // Workspaces — Phase V2
   | "workspace_created"
   | "workspace_deleted"
   | "workspace_member_added"
   | "workspace_member_removed"
-    // Organizations — Phase H
+  // Organizations — Phase H
   | "organization_created"
   | "organization_left"
   | "organization_deleted";
 
 export interface AuditEntry {
   userId?: string | null;
+  user_id?: string | null;
   action: AuditAction;
   resourceType?: string;
   resourceId?: string;
@@ -85,8 +93,9 @@ export interface AuditEntry {
 
 export async function writeAuditLog(db: SupabaseClient, entry: AuditEntry): Promise<void> {
   try {
+    const userId = entry.userId ?? entry.user_id ?? null;
     await db.from("audit_logs").insert({
-      user_id:       entry.userId ?? null,
+      user_id:       userId,
       action:        entry.action,
       resource_type: entry.resourceType ?? null,
       resource_id:   entry.resourceId ?? null,

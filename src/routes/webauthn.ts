@@ -13,6 +13,7 @@ import {
   verifyAuthenticationResponse,
   type RegistrationResponseJSON,
   type AuthenticationResponseJSON,
+  type AuthenticatorTransportFuture,
 } from "@simplewebauthn/server";
 import { authMiddleware } from "../lib/middleware";
 import type { Bindings, Variables } from "../index";
@@ -81,7 +82,7 @@ webauthn.post("/register/options", authMiddleware, async (c) => {
     },
     excludeCredentials: (existing ?? []).map((row) => ({
       id:         row.credential_id as string,
-      transports: (row.transports as string[]) as AuthenticatorTransport[],
+      transports: (row.transports as string[]) as AuthenticatorTransportFuture[],
     })),
   });
 
@@ -194,7 +195,7 @@ webauthn.post("/login/options", async (c) => {
     userVerification: "required",
     allowCredentials: creds.map((row) => ({
       id:         row.credential_id as string,
-      transports: (row.transports as string[]) as AuthenticatorTransport[],
+      transports: (row.transports as string[]) as AuthenticatorTransportFuture[],
     })),
   });
 
@@ -247,9 +248,9 @@ webauthn.post("/login/verify", async (c) => {
       expectedRPID:      RP_ID,
       credential: {
         id:         cred.credential_id as string,
-        publicKey:  base64urlToUint8(cred.public_key as string),
+        publicKey:  base64urlToUint8(cred.public_key as string) as Uint8Array<ArrayBuffer>,
         counter:    cred.counter as number,
-        transports: (cred.transports as string[]) as AuthenticatorTransport[],
+        transports: (cred.transports as string[]) as AuthenticatorTransportFuture[],
       },
       requireUserVerification: true,
     });
