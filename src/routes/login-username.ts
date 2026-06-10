@@ -12,7 +12,7 @@ import type { Bindings, Variables } from "../index";
 import { checkRateLimit, getClientIp, rateLimitResponse } from "../lib/rate-limit";
 import { signJwt } from "../lib/auth";
 import { buildSessionCookie } from "../lib/cookie";
-import { verifySmsOtp, sendSmsOtp, sendLoginEmailOtp, verifyOtpCode } from "../lib/otp";
+import { verifySmsOtp, sendSmsOtp, sendLoginEmailOtp, verifyOtpCode, generateNumericOtp, hashOtpCode } from "../lib/otp";
 import { writeAuditLog } from "../lib/audit";
 
 const loginUsername = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -52,7 +52,7 @@ loginUsername.post("/", async (c) => {
       const hint = phone.replace(/(\+?\d{1,3})\d+(\d{2})$/, "$1•••$2");
       await writeAuditLog(db, {
         userId: user.id as string,
-        action: "login_otp_sent", ip, status: "success",
+        action: "otp_sent", ip, status: "success",
         metadata: { method: "sms" },
       });
       return c.json({
@@ -70,11 +70,25 @@ loginUsername.post("/", async (c) => {
 
   if (email && user.email_verified) {
     try {
-      await sendLoginEmailOtp(email, c.env);
-      const hint = email.replace(/(.{2}).+(@.+)/, "$1•••$2");
+      const emailCode = generateNumericOtp(6);
+      const codeHash  = await hashOtpCode(emailCode);
+      await db.from("auth_otp_codes").insert({
+        user_id:    user.id,
+        email,
+        code_hash:  codeHash,
+        purpose:    "email-otp-login",
+        expires_at: new Date(Date.now() + 600_000).toISOString(),
+        used:       false,
+      });
+      if (c.env.RESEND_API_KEY) {
+        await sendLoginEmailOtp(email, emailCode, c.env.RESEND_API_KEY);
+      } else {
+        console.log("[DEV] Email login OTP for " + email + ": " + emailCode);
+      }
+      const hint = email.replace(/(.{2}).+(@.+)/, "$1\u2022\u2022\u2022$2");
       await writeAuditLog(db, {
         userId: user.id as string,
-        action: "login_otp_sent", ip, status: "success",
+        action: "otp_sent", ip, status: "success",
         metadata: { method: "email" },
       });
       return c.json({
@@ -139,7 +153,7 @@ loginUsername.post("/complete", async (c) => {
     }
     if (!verified) {
       await writeAuditLog(db, {
-        userId: user.id as string, action: "login_otp_failed",
+        userId: user.id as string, action: "otp_failed",
         ip, status: "failure", metadata: { method: "sms" },
       });
       return c.json({ error: "Incorrect code. Try again or request a new one." }, 401);
@@ -164,7 +178,7 @@ loginUsername.post("/complete", async (c) => {
     const valid = await verifyOtpCode((body.code ?? "").trim(), otp.code_hash as string);
     if (!valid) {
       await writeAuditLog(db, {
-        userId: user.id as string, action: "login_otp_failed",
+        userId: user.id as string, action: "otp_failed",
         ip, status: "failure", metadata: { method: "email" },
       });
       return c.json({ error: "Incorrect code. Try again." }, 401);
