@@ -262,23 +262,44 @@ registerUsername.post("/complete", async (c) => {
     }, 429);
   }
 
-  const { data: users } = await db
+  // Try V2 columns first; fall back to base columns if schema hasn't been migrated.
+  // IMPORTANT: always capture `error` — if a column doesn't exist PostgREST returns
+  // an error with data=null, and silently treating null as "user not found" was the
+  // root cause of all email-verification 404s.
+  let userQueryResult = await db
     .from("auth_users")
     .select("id,username,name,role,rald_internal_id,email,reserved_email_address")
     .eq("id", pendingUserId)
     .limit(1);
 
-  const user = users?.[0];
+  if (userQueryResult.error) {
+    console.warn(
+      "[register-username/complete] V2 column select failed (",
+      userQueryResult.error.message,
+      ") — falling back to base columns",
+    );
+    userQueryResult = await db
+      .from("auth_users")
+      .select("id,username,name,role,email")
+      .eq("id", pendingUserId)
+      .limit(1);
+  }
+
+  const user = userQueryResult.data?.[0];
   if (!user) {
+    console.error(
+      "[register-username/complete] user not found for pending_user_id:", pendingUserId,
+      "| db error:", userQueryResult.error?.message ?? "none",
+    );
     return c.json({ error: "Invalid or expired registration session. Please start over." }, 404);
   }
 
-  const userId         = user.id as string;
-  const userEmail      = user.email as string;
-  const userRole       = user.role as string;
-  const userUsername   = user.username as string;
-  const userRaldId     = user.rald_internal_id as string;
-  const userName       = user.name as string;
+  const userId       = user.id as string;
+  const userEmail    = user.email as string;
+  const userRole     = (user.role as string | undefined) ?? "user";
+  const userUsername = (user.username as string | undefined) ?? "";
+  const userRaldId   = (user.rald_internal_id as string | undefined) ?? "";
+  const userName     = (user.name as string | undefined) ?? userUsername;
 
   let verifiedEmail: string | null = null;
   let verifiedPhone: string | null = null;
