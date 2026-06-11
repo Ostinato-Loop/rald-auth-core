@@ -167,7 +167,7 @@ registerUsername.post("/", async (c) => {
     if (createErr?.code === "23505") {
       return c.json({ error: "Username is already taken", available: false }, 409);
     }
-    return c.json({ error: "Failed to create identity", _dbg: createErr?.code + ": " + createErr?.message?.slice(0, 120) }, 500);
+    return c.json({ error: "Failed to create identity" }, 500);
   }
 
   const userId = newUsers[0]!.id as string;
