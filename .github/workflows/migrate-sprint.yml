@@ -1,125 +1,24 @@
 name: Apply All Pending Migrations
-
   on:
     workflow_dispatch:
       inputs:
         dry_run:
-          description: "Dry run — verify connection without applying changes"
+          description: "Dry run (verify connection, skip changes)"
           type: boolean
           default: false
-
   jobs:
     migrate:
-      name: Apply 4 pending SQL migrations
+      name: Apply all pending SQL migrations
       runs-on: ubuntu-latest
       steps:
         - uses: actions/checkout@v4
-
-        - name: Apply all pending migrations
+        - uses: actions/setup-node@v4
+          with:
+            node-version: 22
+        - name: Run migration script
           env:
             SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
             SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
             DRY_RUN: ${{ inputs.dry_run }}
-          run: |
-            cat > /tmp/run-migrations.mjs << 'JSEOF'
-            import { readFileSync } from "fs";
-
-            const url   = process.env.SUPABASE_URL;
-            const key   = process.env.SUPABASE_SERVICE_ROLE_KEY;
-            const isDry = process.env.DRY_RUN === "true";
-
-            if (!url || !key) {
-              console.error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY required");
-              process.exit(1);
-            }
-
-            const ping = await fetch(url + "/rest/v1/auth_users?limit=0", {
-              headers: { apikey: key, Authorization: "Bearer " + key }
-            });
-            console.log("Supabase connection: HTTP " + ping.status);
-            if (ping.status !== 200) { console.error("Cannot reach Supabase"); process.exit(1); }
-            if (isDry) { console.log("DRY RUN: connection OK."); process.exit(0); }
-
-            async function exec(sql) {
-              const r = await fetch(url + "/rest/v1/sql", {
-                method: "POST",
-                headers: { Authorization: "Bearer " + key, apikey: key, "Content-Type": "application/sql" },
-                body: sql,
-              });
-              return { ok: r.ok, status: r.status, text: await r.text() };
-            }
-
-            async function applyMigration(path) {
-              console.log("\n=== " + path + " ===");
-              const sql = readFileSync(path, "utf8");
-
-              const batch = await exec(sql);
-              if (batch.ok) { console.log("  Full migration applied OK."); return; }
-              console.log("  Batch HTTP " + batch.status + " - running statement by statement...");
-
-              let inDollar = false, dollarTag = "", cur = "", passed = 0, warned = 0, failed = 0;
-              for (const line of sql.split("\n")) {
-                if (line.trim().startsWith("--")) { cur += line + "\n"; continue; }
-                const dms = line.match(/\$\$|\$[A-Za-z_][A-Za-z0-9_]*\$/g) || [];
-                for (const m of dms) {
-                  if (!inDollar) { inDollar = true; dollarTag = m; }
-                  else if (m === dollarTag) { inDollar = false; dollarTag = ""; }
-                }
-                cur += line + "\n";
-                if (!inDollar && line.trimEnd().endsWith(";")) {
-                  const stmt = cur.trim();
-                  cur = "";
-                  if (!stmt.replace(/--.*$/gm, "").trim()) continue;
-                  const r2 = await exec(stmt);
-                  const lbl = stmt.replace(/\s+/g, " ").slice(0, 80);
-                  if (r2.ok) { console.log("  OK: " + lbl); passed++; }
-                  else if (r2.text.includes("already exists") || r2.text.includes("duplicate")) {
-                    console.log("  SKIP (exists): " + lbl); passed++;
-                  } else if (r2.text.includes("must be owner") || r2.text.includes("permission denied")) {
-                    console.log("  WARN (superuser needed): " + lbl); warned++;
-                  } else {
-                    console.log("  FAIL: " + lbl + " -> " + r2.text.slice(0, 100)); failed++;
-                  }
-                }
-              }
-              console.log("  " + passed + " ok | " + warned + " superuser | " + failed + " failed");
-              if (failed > 0) process.exitCode = 1;
-            }
-
-            const migrations = [
-              "supabase/migrations/20260611_country_activation_framework.sql",
-              "supabase/migrations/20260611_username_registry_status.sql",
-              "supabase/migrations/20260611_identity_audit_sprint.sql",
-              "supabase/migrations/20260611_auto_username_migration.sql",
-            ];
-            for (const m of migrations) await applyMigration(m);
-            console.log("\n=== All migrations complete ===");
-            JSEOF
-            node /tmp/run-migrations.mjs
-
-        - name: Verify tables exist
-          env:
-            SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-            SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          run: |
-            node << 'JSEOF'
-            const url = process.env.SUPABASE_URL;
-            const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-            const h   = { apikey: key, Authorization: "Bearer " + key };
-            const checks = [
-              ["country_registry",         url + "/rest/v1/country_registry?limit=0"],
-              ["usernames.status",         url + "/rest/v1/usernames?select=status&limit=0"],
-              ["auth_trust_profiles",      url + "/rest/v1/auth_trust_profiles?limit=0"],
-              ["username_migration_queue", url + "/rest/v1/username_migration_queue?limit=0"],
-            ];
-            let allOk = true;
-            for (const [name, endpoint] of checks) {
-              const r = await fetch(endpoint, { headers: h });
-              const ok = r.status === 200 || r.status === 206;
-              console.log((ok ? "OK" : "FAIL") + " " + name + ": HTTP " + r.status);
-              if (!ok) allOk = false;
-            }
-            if (!allOk) { console.error("Verification failed"); process.exit(1); }
-            console.log("All tables verified.");
-            JSEOF
+          run: node scripts/run-migrations.mjs
   
