@@ -32,23 +32,35 @@ export async function sendSmsOtp(
     return (await res.json()) as { pinId?: string; message?: string };
   };
 
+  // Helper: did this attempt return a sender-approval error?
+  const isSenderError = (d: { pinId?: string; message?: string }) =>
+    !d.pinId && (
+      (d.message ?? "").toLowerCase().includes("senderid") ||
+      (d.message ?? "").toLowerCase().includes("sender") ||
+      (d.message ?? "").toLowerCase().includes("applicationid")
+    );
+
   // Try configured sender on dnd channel first
   let data = await attemptSend(senderId, "dnd");
 
   // If sender not approved, try N-Alert on dnd
-  if (!data.pinId && (data.message?.includes("ApplicationSenderId not found") || data.message?.includes("sender"))) {
+  if (isSenderError(data)) {
     if (senderId !== "N-Alert") {
       console.warn("[otp] sender '" + senderId + "' not approved — retrying with N-Alert/dnd");
       data = await attemptSend("N-Alert", "dnd");
     }
     // Final fallback: generic channel (Termii shared pool, no sender approval needed)
-    if (!data.pinId && (data.message?.includes("ApplicationSenderId not found") || data.message?.includes("sender"))) {
+    if (isSenderError(data)) {
       console.warn("[otp] N-Alert not approved — falling back to generic channel");
       data = await attemptSend("", "generic");
     }
   }
 
-  if (!data.pinId) throw new Error(data.message ?? "Failed to send verification code");
+  if (!data.pinId) {
+    // Log internal detail for debugging but never leak vendor messages to callers
+    console.error("[otp] all SMS channels failed:", data.message ?? "(no message)");
+    throw new Error("SMS_UNAVAILABLE");
+  }
   return { pinId: data.pinId };
 }
 
