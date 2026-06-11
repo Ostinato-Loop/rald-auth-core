@@ -109,7 +109,8 @@ loopAuth.post("/loop-claim", async (c) => {
   const now                  = new Date().toISOString();
 
   // Create the user — this is a real first-class RALD identity
-  const { data: newUsers, error: createErr } = await db
+  // Try V2 extended columns first; fall back to base schema if migration not yet applied (42703 = column does not exist)
+  let loopInsertResult = await db
     .from("auth_users")
     .insert({
       email:                  placeholderEmail,
@@ -122,11 +123,28 @@ loopAuth.post("/loop-claim", async (c) => {
       email_verified:         false,
       phone_verified:         false,
       reserved_email_address: reservedEmailAddress,
-      trust_level:            "basic",  // has username → basic trust
+      trust_level:            "basic",
       trust_score:            30,
     })
     .select("id")
     .limit(1);
+
+  if (loopInsertResult.error?.code === "42703" || loopInsertResult.error?.message?.includes("does not exist")) {
+    console.warn("[loop-claim] V2 schema pending — retrying with base columns (apply migration to fix)");
+    loopInsertResult = await db
+      .from("auth_users")
+      .insert({
+        email:          placeholderEmail,
+        name:           displayName,
+        role:           "user",
+        email_verified: false,
+        phone_verified: false,
+      })
+      .select("id")
+      .limit(1);
+  }
+
+  const { data: newUsers, error: createErr } = loopInsertResult;
 
   if (createErr || !newUsers?.length) {
     if (createErr?.code === "23505") {
