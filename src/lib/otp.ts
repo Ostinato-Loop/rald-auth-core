@@ -23,7 +23,7 @@ export async function sendSmsOtp(
       message_text: "Your RALD verification code is < 1234 >. Valid for 10 minutes. Do not share. RALD by LILCKY STUDIO LIMITED.",
       pin_type: "NUMERIC",
     };
-    if (channel !== "generic") body["from"] = sid;
+    if (channel !== "generic") body.from = sid;
     const res = await fetch("https://api.ng.termii.com/api/sms/otp/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
