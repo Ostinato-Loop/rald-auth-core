@@ -1,12 +1,9 @@
 // RALD Auth Core — Cloudflare Worker
-// Deployed at: auth.rald.cloud | Version: 2.7.0
+// Deployed at: auth.rald.cloud | Version: 2.8.0
+// Changelog v2.8.0: Loop Identity Integration
+//   - POST /auth/loop-claim: one-step username claim for Loop — issues JWT immediately
+//     Loop users are now first-class RALD identities from day one (no more guest_xxx@loop.guest)
 // Changelog v2.7.0: Identity Audit & Username Ownership Sprint (P1–P6)
-//   - P1: Email OTP fixed (purpose column migration), profiles auto-created on register
-//   - P2: Username change policy added (/username/change, 30-day cooldown)
-//   - P3: reserved_email_address stored in auth_users at claim time
-//   - P4: needs_username flag in login response, /migration routes for claim flow
-//   - P5: identity_registry view, repair_identity_records() RPC, /migration/registry-check
-//   - P6: /profiles/me returns smart_fill data, never loses existing regional data
 // Changelog v2.6.0: QR Code Login + WebAuthn/Face Auth end-to-end
 // Changelog v2.5.0: V2 Username-First Identity — /username, /auth/register-username, /recovery
 // Changelog v2.3.0: Phase H.2 — Privacy Center, Verification Engine, Role Engine, Ecosystem Events
@@ -39,6 +36,7 @@ import webauthnRoutes           from "./routes/webauthn";
 import metricsRoutes            from "./routes/metrics";
 import loginUsernameRoute       from "./routes/login-username";
 import migrationRoutes          from "./routes/migration";
+import loopAuthRoutes           from "./routes/loop-auth";
 
 export type Bindings = {
   SUPABASE_URL:              string;
@@ -59,7 +57,7 @@ export type Variables = {
   user?: JwtPayload;
 };
 
-const VERSION = "2.7.0";
+const VERSION = "2.8.0";
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -157,7 +155,7 @@ app.get("/ready", (c) =>
       rate_limit_kv: !!(c.env.RATE_LIMIT_KV),
       session_kv:    !!(c.env.RALD_SESSION_KV),
     },
-    phase: "V2.7 — Identity Audit & Username Ownership Sprint",
+    phase: "V2.8 — Loop Identity Integration",
     ...serviceInfo(c),
   })
 );
@@ -170,6 +168,7 @@ app.get("/system/status", (c) =>
     environment:  c.env.ENVIRONMENT ?? "production",
     features: {
       auth:               "✓ login, register, OTP (email+SMS), password reset",
+      loop_identity:      "✓ /auth/loop-claim — username-first, JWT issued immediately, no OTP required",
       username:           "✓ check, claim, change (30-day policy), migration flow",
       sessions:           "✓ create, revoke, revoke-all, device revoke",
       devices:            "✓ list, remove, trust",
@@ -182,12 +181,6 @@ app.get("/system/status", (c) =>
       graph:              "✓ identity graph, mutual connections, suggestions",
       migration:          "✓ identity-status, claim-username, repair, registry-check (admin)",
       security_headers:   "✓ HSTS, CSP, X-Frame-Options, Referrer-Policy",
-      // P1–P6 sprint
-      email_otp_fix:      "✓ purpose column added — email OTP now works",
-      reserved_mail:      "✓ username@rald.me reserved at claim time",
-      trust_profiles:     "✓ auto-created on registration complete",
-      identity_registry:  "✓ identity_registry view + repair_identity_records()",
-      smart_profiles:     "✓ /profiles/me never loses regional data",
     },
     timestamp: new Date().toISOString(),
   })
@@ -240,6 +233,7 @@ app.get("/system/dependencies", async (c) => {
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.route("/auth",                   authRoutes);
+app.route("/auth",                   loopAuthRoutes);   // POST /auth/loop-claim
 app.route("/devices",                devicesRoutes);
 app.route("/sso",                    ssoRoutes);
 app.route("/sso",                    clerkRoutes);
