@@ -144,6 +144,38 @@ jobs:
           fi
           echo "SMOKE TEST PASSED: /health returned HTTP $STATUS"
 
+
+      # ── Seed country registry (idempotent) ───────────────────────
+      # Requires tables from supabase/migrations/20260611_country_activation_framework.sql
+      # to exist. If not yet applied, run via Supabase Dashboard SQL Editor first.
+      - name: Seed country registry (idempotent — ON CONFLICT DO NOTHING)
+        continue-on-error: true
+        env:
+          SUPABASE_URL: https://onxdcikfttdmnhofsuwo.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
+            echo "WARNING: SUPABASE_SERVICE_ROLE_KEY not set — skipping country seed"
+            exit 0
+          fi
+          AUTH="Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY"
+          KEY="apikey: $SUPABASE_SERVICE_ROLE_KEY"
+          CT="Content-Type: application/json"
+          PREF="Prefer: resolution=ignore-duplicates,return=minimal"
+          BASE="$SUPABASE_URL/rest/v1/country_registry"
+          # Wave 1: Nigeria — ACTIVE (public beta launch country)
+          curl -sf -X POST "$BASE" -H "$AUTH" -H "$KEY" -H "$CT" -H "$PREF" \
+            -d '[{"country_code":"NG","country_name":"Nigeria","status":"ACTIVE","demand_score":100,"legal_score":90,"compliance_score":85,"moderation_score":90,"infrastructure_score":95,"support_score":90,"launch_date":"2026-06-11","legal_notes":"NITDA guidelines reviewed. NCC compliance confirmed. NDPA data protection in place.","compliance_notes":"FCCPC compliance confirmed. Identity requirements met. KYC framework active."}]' \
+            && echo "SEED: NG (ACTIVE) ✓" || echo "WARNING: NG seed failed — apply migration first"
+          # Wave 2: Kenya, Tanzania, Ghana — WAITLIST
+          curl -sf -X POST "$BASE" -H "$AUTH" -H "$KEY" -H "$CT" -H "$PREF" \
+            -d '[{"country_code":"KE","country_name":"Kenya","status":"WAITLIST","demand_score":72},{"country_code":"TZ","country_name":"Tanzania","status":"WAITLIST","demand_score":58},{"country_code":"GH","country_name":"Ghana","status":"WAITLIST","demand_score":68}]' \
+            && echo "SEED: KE/TZ/GH (WAITLIST) ✓" || echo "WARNING: wave 2 seed failed"
+          # Wave 3: South Africa, India, Indonesia — WAITLIST
+          curl -sf -X POST "$BASE" -H "$AUTH" -H "$KEY" -H "$CT" -H "$PREF" \
+            -d '[{"country_code":"ZA","country_name":"South Africa","status":"WAITLIST","demand_score":65},{"country_code":"IN","country_name":"India","status":"WAITLIST","demand_score":80},{"country_code":"ID","country_name":"Indonesia","status":"WAITLIST","demand_score":74}]' \
+            && echo "SEED: ZA/IN/ID (WAITLIST) ✓" || echo "WARNING: wave 3 seed failed"
+          echo "Country registry seed complete."
       - name: Record deployment audit
         if: always()
         run: |
