@@ -125,7 +125,7 @@ registerUsername.post("/", async (c) => {
   const placeholderEmail     = `${lower}.pending@rald.identity`;
   const reservedEmailAddress = `${lower}@rald.me`;
 
-  const { data: newUsers, error: createErr } = await db
+  let regInsertResult = await db
     .from("auth_users")
     .insert({
       email:                  placeholderEmail,
@@ -143,6 +143,23 @@ registerUsername.post("/", async (c) => {
     })
     .select("id")
     .limit(1);
+
+  if (regInsertResult.error?.code === "42703" || regInsertResult.error?.message?.includes("does not exist")) {
+    console.warn("[register-username] V2 schema pending — retrying with base columns (apply migration to fix)");
+    regInsertResult = await db
+      .from("auth_users")
+      .insert({
+        email:          placeholderEmail,
+        name:           lower,
+        role:           "user",
+        email_verified: false,
+        phone_verified: false,
+      })
+      .select("id")
+      .limit(1);
+  }
+
+  const { data: newUsers, error: createErr } = regInsertResult;
 
   if (createErr || !newUsers || newUsers.length === 0) {
     console.error("[register-username] user create error:", createErr?.message);
