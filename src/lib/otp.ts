@@ -10,33 +10,42 @@ export async function sendSmsOtp(
   apiKey: string,
   senderId = "N-Alert"
 ): Promise<{ pinId: string }> {
-  const attemptSend = async (sid: string) => {
+  const attemptSend = async (sid: string, channel: string) => {
+    const body: Record<string, unknown> = {
+      api_key: apiKey,
+      message_type: "NUMERIC",
+      to: phone,
+      channel,
+      pin_attempts: 3,
+      pin_time_to_live: 10,
+      pin_length: 6,
+      pin_placeholder: "< 1234 >",
+      message_text: "Your RALD verification code is < 1234 >. Valid for 10 minutes. Do not share. RALD by LILCKY STUDIO LIMITED.",
+      pin_type: "NUMERIC",
+    };
+    if (channel !== "generic") body["from"] = sid;
     const res = await fetch("https://api.ng.termii.com/api/sms/otp/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        api_key: apiKey,
-        message_type: "NUMERIC",
-        to: phone,
-        from: sid,
-        channel: "dnd",
-        pin_attempts: 3,
-        pin_time_to_live: 10,
-        pin_length: 6,
-        pin_placeholder: "< 1234 >",
-        message_text: "Your RALD verification code is < 1234 >. Valid for 10 minutes. Do not share. RALD by LILCKY STUDIO LIMITED.",
-        pin_type: "NUMERIC",
-      }),
+      body: JSON.stringify(body),
     });
     return (await res.json()) as { pinId?: string; message?: string };
   };
 
-  let data = await attemptSend(senderId);
+  // Try configured sender on dnd channel first
+  let data = await attemptSend(senderId, "dnd");
 
-  // If the configured sender ID is not approved, retry with the generic N-Alert sender
-  if (!data.pinId && senderId !== "N-Alert" && (data.message?.includes("ApplicationSenderId not found") || data.message?.includes("sender"))) {
-    console.warn("[otp] sender '" + senderId + "' not approved — retrying with N-Alert");
-    data = await attemptSend("N-Alert");
+  // If sender not approved, try N-Alert on dnd
+  if (!data.pinId && (data.message?.includes("ApplicationSenderId not found") || data.message?.includes("sender"))) {
+    if (senderId !== "N-Alert") {
+      console.warn("[otp] sender '" + senderId + "' not approved — retrying with N-Alert/dnd");
+      data = await attemptSend("N-Alert", "dnd");
+    }
+    // Final fallback: generic channel (Termii shared pool, no sender approval needed)
+    if (!data.pinId && (data.message?.includes("ApplicationSenderId not found") || data.message?.includes("sender"))) {
+      console.warn("[otp] N-Alert not approved — falling back to generic channel");
+      data = await attemptSend("", "generic");
+    }
   }
 
   if (!data.pinId) throw new Error(data.message ?? "Failed to send verification code");
