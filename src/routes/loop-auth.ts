@@ -152,7 +152,7 @@ loopAuth.post("/loop-claim", async (c) => {
       return c.json({ error: "Username is already taken", available: false }, 409);
     }
     console.error("[loop-claim] user create error code=" + createErr?.code + " msg=" + createErr?.message);
-    return c.json({ error: "Failed to create identity", _dbg: createErr?.code + ": " + createErr?.message?.slice(0, 120) }, 500);
+    return c.json({ error: "Failed to create identity" }, 500);
   }
 
   const userId = newUsers[0]!.id as string;
