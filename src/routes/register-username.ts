@@ -266,40 +266,48 @@ registerUsername.post("/complete", async (c) => {
   // IMPORTANT: always capture `error` — if a column doesn't exist PostgREST returns
   // an error with data=null, and silently treating null as "user not found" was the
   // root cause of all email-verification 404s.
-  let userQueryResult = await db
+  const v2Result = await db
     .from("auth_users")
     .select("id,username,name,role,rald_internal_id,email,reserved_email_address")
     .eq("id", pendingUserId)
     .limit(1);
 
-  if (userQueryResult.error) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let rawUser: Record<string, any> | undefined;
+  let lastDbError: string | undefined;
+
+  if (v2Result.error) {
     console.warn(
       "[register-username/complete] V2 column select failed (",
-      userQueryResult.error.message,
+      v2Result.error.message,
       ") — falling back to base columns",
     );
-    userQueryResult = await db
+    const baseResult = await db
       .from("auth_users")
       .select("id,username,name,role,email")
       .eq("id", pendingUserId)
       .limit(1);
+    rawUser      = baseResult.data?.[0] as typeof rawUser;
+    lastDbError  = baseResult.error?.message;
+  } else {
+    rawUser     = v2Result.data?.[0] as typeof rawUser;
+    lastDbError = undefined;
   }
 
-  const user = userQueryResult.data?.[0];
-  if (!user) {
+  if (!rawUser) {
     console.error(
       "[register-username/complete] user not found for pending_user_id:", pendingUserId,
-      "| db error:", userQueryResult.error?.message ?? "none",
+      "| db error:", lastDbError ?? v2Result.error?.message ?? "none",
     );
     return c.json({ error: "Invalid or expired registration session. Please start over." }, 404);
   }
 
-  const userId       = user.id as string;
-  const userEmail    = user.email as string;
-  const userRole     = (user.role as string | undefined) ?? "user";
-  const userUsername = (user.username as string | undefined) ?? "";
-  const userRaldId   = (user.rald_internal_id as string | undefined) ?? "";
-  const userName     = (user.name as string | undefined) ?? userUsername;
+  const userId       = rawUser.id as string;
+  const userEmail    = rawUser.email as string;
+  const userRole     = (rawUser.role as string | undefined) ?? "user";
+  const userUsername = (rawUser.username as string | undefined) ?? "";
+  const userRaldId   = (rawUser.rald_internal_id as string | undefined) ?? "";
+  const userName     = (rawUser.name as string | undefined) ?? userUsername;
 
   let verifiedEmail: string | null = null;
   let verifiedPhone: string | null = null;
