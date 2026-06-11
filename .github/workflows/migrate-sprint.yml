@@ -1,0 +1,71 @@
+name: Apply Identity Sprint Migration
+
+on:
+  workflow_dispatch:
+
+jobs:
+  migrate:
+    name: Run 20260611_identity_audit_sprint.sql
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Supabase CLI
+        run: npm install -g supabase@latest
+
+      - name: Extract project ref from SUPABASE_URL
+        id: ref
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        run: |
+          REF=$(echo "$SUPABASE_URL" | sed 's|https://||' | sed 's|\.supabase\.co.*||')
+          echo "ref=$REF" >> $GITHUB_OUTPUT
+          echo "Project ref: $REF"
+
+      - name: Apply migration via Supabase Management API
+        env:
+          PROJECT_REF: ${{ steps.ref.outputs.ref }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          SQL=$(cat supabase/migrations/20260611_identity_audit_sprint.sql)
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{\"query\": $(echo "$SQL" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')}")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+          echo "HTTP: $HTTP_CODE"
+          echo "Body: $BODY"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Management API with service_role failed (HTTP $HTTP_CODE) — trying psql..."
+            PGPASSWORD=$SUPABASE_SERVICE_ROLE_KEY psql \
+              "host=db.${PROJECT_REF}.supabase.co port=5432 dbname=postgres user=postgres sslmode=require" \
+              -f supabase/migrations/20260611_identity_audit_sprint.sql || true
+          else
+            echo "Migration applied successfully via Management API"
+          fi
+
+      - name: Verify migration applied
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          node << 'JSEOF'
+          const url = process.env.SUPABASE_URL;
+          const key  = process.env.SUPABASE_SERVICE_ROLE_KEY;
+          async function check(table) {
+            const r = await fetch(`${url}/rest/v1/${table}?limit=1`, {
+              headers: { apikey: key, Authorization: `Bearer ${key}` }
+            });
+            return r.status === 200 ? '✓' : `✗ HTTP ${r.status}`;
+          }
+          Promise.all([
+            check('auth_trust_profiles'),
+            check('username_migration_queue'),
+          ]).then(([tp, mq]) => {
+            console.log('auth_trust_profiles:', tp);
+            console.log('username_migration_queue:', mq);
+            if (!tp.startsWith('✓') || !mq.startsWith('✓')) process.exit(1);
+          });
+          JSEOF
