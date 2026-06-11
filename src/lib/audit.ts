@@ -3,6 +3,7 @@
 // Phase G.10: Expanded AuditAction types for session management
 // Phase H.2: Added privacy, verification, role, ecosystem action types
 // Phase V2.1: Added QR login and WebAuthn audit actions
+// Phase 4 (Emergency Stabilization Sprint): Added admin username console actions
 // LILCKY STUDIO LIMITED
 
 import { SupabaseClient } from "@supabase/supabase-js";
@@ -64,6 +65,14 @@ export type AuditAction =
   | "username_claimed"
   | "username_released"
   | "username_admin_change"
+  // Admin Username Console — Phase 4 (Emergency Stabilization Sprint)
+  | "admin_username_reserve"
+  | "admin_username_release"
+  | "admin_username_transfer"
+  | "admin_username_protect"
+  | "admin_username_premium"
+  | "admin_username_recover"
+  | "admin_username_bulk_reserve"
   // Recovery Codes — Phase V2
   | "recovery_codes_generated"
   | "recovery_code_used"
