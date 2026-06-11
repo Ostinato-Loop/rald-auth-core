@@ -267,7 +267,7 @@ expansion.post("/:code/restrict", adminMiddleware, async (c) => {
   const ip   = getClientIp(c.req.raw);
   const code = (c.req.param("code") ?? "").toUpperCase().slice(0, 2);
 
-  const body = await c.req.json<{ reason?: string }>().catch(() => ({}));
+  const body: { reason?: string } = await c.req.json<{ reason?: string }>().catch(() => ({}));
 
   const { data: reg } = await db
     .from("country_registry")
