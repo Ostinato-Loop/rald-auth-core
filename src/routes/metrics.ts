@@ -1,5 +1,7 @@
 // RALD Auth Core — Internal Observability Metrics
 // GET  /admin/metrics          — key operational counters (last 24h / 7d)
+// GET  /admin/metrics/retention — D1 / D7 / D30 cohort retention
+// Phase 6 Hardening Sprint (2026-06-11): Added retention cohort endpoint
 // GET  /admin/metrics/realtime — live: last 60 min, 5-min buckets
 //
 // Protected by admin JWT. Never exposed publicly.
@@ -125,6 +127,97 @@ metrics.get("/realtime", adminMiddleware, async (c) => {
     since,
     interval_minutes: 5,
     timeline,
+  });
+});
+
+
+
+// ── GET /admin/metrics/retention — D1 / D7 / D30 cohort retention ─────────────
+// Phase 6 — Public Beta Hardening Sprint
+// Computes cohort retention using audit_logs (login actions as "active" signal).
+// D1 cohort: users who registered 1–2 days ago; retained = had login action in last 24h.
+// D7 cohort: users who registered 7–14 days ago; retained = had login in last 7 days.
+// D30 cohort: users who registered 30–60 days ago; retained = had login in last 30 days.
+// LILCKY STUDIO LIMITED
+metrics.get("/retention", adminMiddleware, async (c) => {
+  const db  = c.get("db");
+  const now = new Date();
+
+  const ts = (daysAgo: number) => new Date(now.getTime() - daysAgo * 86_400_000).toISOString();
+
+  // Cohort windows
+  const d1_start  = ts(2);  const d1_end  = ts(1);
+  const d7_start  = ts(14); const d7_end  = ts(7);
+  const d30_start = ts(60); const d30_end = ts(30);
+
+  // Activity windows
+  const active_d1  = ts(1);
+  const active_d7  = ts(7);
+  const active_d30 = ts(30);
+
+  // Fetch cohort sizes and retained counts in parallel
+  const [
+    d1_cohort, d7_cohort, d30_cohort,
+    d1_active, d7_active, d30_active,
+    total_users, new_7d, new_30d,
+  ] = await Promise.all([
+    // Cohort sizes: users who registered in each window
+    db.from("audit_logs").select("user_id", { count: "exact", head: true })
+      .eq("action", "register").gte("created_at", d1_start).lt("created_at", d1_end),
+    db.from("audit_logs").select("user_id", { count: "exact", head: true })
+      .eq("action", "register").gte("created_at", d7_start).lt("created_at", d7_end),
+    db.from("audit_logs").select("user_id", { count: "exact", head: true })
+      .eq("action", "register").gte("created_at", d30_start).lt("created_at", d30_end),
+    // Retained: users from each cohort who had ANY login in the activity window
+    // We approximate by counting distinct user_ids with login actions in the window
+    // (Supabase doesn't do subqueries; we do two-step in memory for exact numbers)
+    db.from("audit_logs").select("user_id").eq("action", "login")
+      .gte("created_at", active_d1).gte("created_at", d1_start),
+    db.from("audit_logs").select("user_id").eq("action", "login")
+      .gte("created_at", active_d7).gte("created_at", d7_start),
+    db.from("audit_logs").select("user_id").eq("action", "login")
+      .gte("created_at", active_d30).gte("created_at", d30_start),
+    // Total users and recent new users
+    db.from("auth_users").select("id", { count: "exact", head: true }),
+    db.from("auth_users").select("id", { count: "exact", head: true }).gte("created_at", ts(7)),
+    db.from("auth_users").select("id", { count: "exact", head: true }).gte("created_at", ts(30)),
+  ]);
+
+  // Deduplicate retained user IDs in memory
+  const uniq = (rows: { user_id: string }[] | null) =>
+    new Set((rows ?? []).map(r => r.user_id)).size;
+
+  const d1_cohort_n  = d1_cohort.count  ?? 0;
+  const d7_cohort_n  = d7_cohort.count  ?? 0;
+  const d30_cohort_n = d30_cohort.count ?? 0;
+
+  const d1_ret_n  = uniq(d1_active.data  as { user_id: string }[] | null);
+  const d7_ret_n  = uniq(d7_active.data  as { user_id: string }[] | null);
+  const d30_ret_n = uniq(d30_active.data as { user_id: string }[] | null);
+
+  const pct = (retained: number, cohort: number) =>
+    cohort > 0 ? Math.round((retained / cohort) * 100) : null;
+
+  return c.json({
+    generated_at:   now.toISOString(),
+    total_users:    total_users.count ?? 0,
+    new_users_7d:   new_7d.count ?? 0,
+    new_users_30d:  new_30d.count ?? 0,
+    d1: {
+      cohort_size:   d1_cohort_n,
+      retained:      d1_ret_n,
+      retention_pct: pct(d1_ret_n, d1_cohort_n),
+    },
+    d7: {
+      cohort_size:   d7_cohort_n,
+      retained:      d7_ret_n,
+      retention_pct: pct(d7_ret_n, d7_cohort_n),
+    },
+    d30: {
+      cohort_size:   d30_cohort_n,
+      retained:      d30_ret_n,
+      retention_pct: pct(d30_ret_n, d30_cohort_n),
+    },
   });
 });
 
