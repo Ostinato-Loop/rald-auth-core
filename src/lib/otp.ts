@@ -10,24 +10,35 @@ export async function sendSmsOtp(
   apiKey: string,
   senderId = "N-Alert"
 ): Promise<{ pinId: string }> {
-  const res = await fetch("https://api.ng.termii.com/api/sms/otp/send", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      api_key: apiKey,
-      message_type: "NUMERIC",
-      to: phone,
-      from: senderId,
-      channel: "dnd",
-      pin_attempts: 3,
-      pin_time_to_live: 10,
-      pin_length: 6,
-      pin_placeholder: "< 1234 >",
-      message_text: "Your RALD verification code is < 1234 >. Valid for 10 minutes. Do not share. RALD by LILCKY STUDIO LIMITED.",
-      pin_type: "NUMERIC",
-    }),
-  });
-  const data = (await res.json()) as { pinId?: string; message?: string };
+  const attemptSend = async (sid: string) => {
+    const res = await fetch("https://api.ng.termii.com/api/sms/otp/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        api_key: apiKey,
+        message_type: "NUMERIC",
+        to: phone,
+        from: sid,
+        channel: "dnd",
+        pin_attempts: 3,
+        pin_time_to_live: 10,
+        pin_length: 6,
+        pin_placeholder: "< 1234 >",
+        message_text: "Your RALD verification code is < 1234 >. Valid for 10 minutes. Do not share. RALD by LILCKY STUDIO LIMITED.",
+        pin_type: "NUMERIC",
+      }),
+    });
+    return (await res.json()) as { pinId?: string; message?: string };
+  };
+
+  let data = await attemptSend(senderId);
+
+  // If the configured sender ID is not approved, retry with the generic N-Alert sender
+  if (!data.pinId && senderId !== "N-Alert" && (data.message?.includes("ApplicationSenderId not found") || data.message?.includes("sender"))) {
+    console.warn("[otp] sender '" + senderId + "' not approved — retrying with N-Alert");
+    data = await attemptSend("N-Alert");
+  }
+
   if (!data.pinId) throw new Error(data.message ?? "Failed to send verification code");
   return { pinId: data.pinId };
 }
