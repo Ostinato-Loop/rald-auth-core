@@ -67,7 +67,7 @@ expansion.get("/", adminMiddleware, async (c) => {
 // ── GET /admin/expansion/:code — single country detail ───────────────────────
 expansion.get("/:code", adminMiddleware, async (c) => {
   const db   = c.get("db");
-  const code = c.req.param("code").toUpperCase().slice(0, 2);
+  const code = (c.req.param("code") ?? "").toUpperCase().slice(0, 2);
 
   const { data, error } = await db
     .from("country_registry")
@@ -138,7 +138,7 @@ expansion.post("/", adminMiddleware, async (c) => {
 
   await writeAuditLog(db, {
     action: "country_added", ip, status: "success",
-    metadata: { country_code: code, country_name: body.country_name, admin: user.sub },
+    metadata: { country_code: code, country_name: body.country_name, admin: user.id },
   });
 
   return c.json({ ok: true, country: data }, 201);
@@ -147,7 +147,7 @@ expansion.post("/", adminMiddleware, async (c) => {
 // ── PATCH /admin/expansion/:code/scorecard — update regulatory scores ─────────
 expansion.patch("/:code/scorecard", adminMiddleware, async (c) => {
   const db   = c.get("db");
-  const code = c.req.param("code").toUpperCase().slice(0, 2);
+  const code = (c.req.param("code") ?? "").toUpperCase().slice(0, 2);
 
   const body = await c.req.json<{
     legal_score?:          number;
@@ -169,8 +169,9 @@ expansion.patch("/:code/scorecard", adminMiddleware, async (c) => {
     "legal_score","compliance_score","moderation_score","infrastructure_score","support_score","demand_score",
     "legal_notes","compliance_notes","moderation_notes","infrastructure_notes",
   ];
+  const bodyRec = body as Record<string, unknown>;
   for (const key of allowed) {
-    if (body[key as keyof typeof body] !== undefined) update[key] = body[key as keyof typeof body];
+    if (bodyRec[key] !== undefined) update[key] = bodyRec[key];
   }
 
   const { data, error } = await db
@@ -191,7 +192,7 @@ expansion.post("/:code/transition", adminMiddleware, async (c) => {
   const db   = c.get("db");
   const user = c.get("user")!;
   const ip   = getClientIp(c.req.raw);
-  const code = c.req.param("code").toUpperCase().slice(0, 2);
+  const code = (c.req.param("code") ?? "").toUpperCase().slice(0, 2);
 
   const body = await c.req.json<{
     to_status: string;
@@ -223,7 +224,7 @@ expansion.post("/:code/transition", adminMiddleware, async (c) => {
   const updatePayload: Record<string, unknown> = { status: toStatus };
   if (toStatus === "ACTIVE") {
     updatePayload.activated_at  = new Date().toISOString();
-    updatePayload.approved_by   = user.sub;
+    updatePayload.approved_by   = user.id;
     updatePayload.approved_at   = new Date().toISOString();
   }
 
@@ -241,13 +242,13 @@ expansion.post("/:code/transition", adminMiddleware, async (c) => {
     country_code: code,
     from_status:  fromStatus,
     to_status:    toStatus,
-    changed_by:   user.sub,
+    changed_by:   user.id,
     reason:       body.reason ?? null,
   });
 
   await writeAuditLog(db, {
-    action: "country_status_transition", ip, status: "success",
-    metadata: { country_code: code, from: fromStatus, to: toStatus, admin: user.sub, reason: body.reason },
+    action: "country_status_changed", ip, status: "success",
+    metadata: { country_code: code, from: fromStatus, to: toStatus, admin: user.id, reason: body.reason },
   });
 
   return c.json({
@@ -264,7 +265,7 @@ expansion.post("/:code/restrict", adminMiddleware, async (c) => {
   const db   = c.get("db");
   const user = c.get("user")!;
   const ip   = getClientIp(c.req.raw);
-  const code = c.req.param("code").toUpperCase().slice(0, 2);
+  const code = (c.req.param("code") ?? "").toUpperCase().slice(0, 2);
 
   const body = await c.req.json<{ reason?: string }>().catch(() => ({}));
 
@@ -290,13 +291,13 @@ expansion.post("/:code/restrict", adminMiddleware, async (c) => {
     country_code: code,
     from_status:  fromStatus,
     to_status:    "RESTRICTED",
-    changed_by:   user.sub,
+    changed_by:   user.id,
     reason:       body.reason ?? "Emergency restriction applied",
   });
 
   await writeAuditLog(db, {
-    action: "country_emergency_restrict", ip, status: "success",
-    metadata: { country_code: code, from: fromStatus, admin: user.sub, reason: body.reason },
+    action: "country_restricted", ip, status: "success",
+    metadata: { country_code: code, from: fromStatus, admin: user.id, reason: body.reason },
   });
 
   return c.json({
@@ -321,7 +322,7 @@ expansion.patch("/:code/payrald", adminMiddleware, async (c) => {
   const db   = c.get("db");
   const user = c.get("user")!;
   const ip   = getClientIp(c.req.raw);
-  const code = c.req.param("code").toUpperCase().slice(0, 2);
+  const code = (c.req.param("code") ?? "").toUpperCase().slice(0, 2);
 
   const body = await c.req.json<{ status: string; reason?: string }>().catch(() => null);
   if (!body?.status) return c.json({ error: "status is required" }, 400);
@@ -337,8 +338,8 @@ expansion.patch("/:code/payrald", adminMiddleware, async (c) => {
   if (error || !data) return c.json({ error: "Country not found" }, 404);
 
   await writeAuditLog(db, {
-    action: "payrald_status_update", ip, status: "success",
-    metadata: { country_code: code, payrald_status: body.status, admin: user.sub },
+    action: "payrald_gate_updated", ip, status: "success",
+    metadata: { country_code: code, payrald_status: body.status, admin: user.id },
   });
 
   return c.json({ ok: true, country: data, message: `PayRald status for ${data.country_name} set to ${body.status}` });
@@ -347,7 +348,7 @@ expansion.patch("/:code/payrald", adminMiddleware, async (c) => {
 // ── GET /admin/expansion/:code/waitlist — paginated waitlist ──────────────────
 expansion.get("/:code/waitlist", adminMiddleware, async (c) => {
   const db     = c.get("db");
-  const code   = c.req.param("code").toUpperCase().slice(0, 2);
+  const code   = (c.req.param("code") ?? "").toUpperCase().slice(0, 2);
   const limit  = Math.min(Number(c.req.query("limit") ?? 50), 200);
   const offset = Number(c.req.query("offset") ?? 0);
 
