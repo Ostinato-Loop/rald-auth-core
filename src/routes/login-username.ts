@@ -19,9 +19,7 @@ import {
   verifyOtpCode,
   generateNumericOtp,
   hashOtpCode,
-  sendLoginEmailOtp,
-  sendNewDeviceNotification,
-} from "../lib/otp";
+  sendLoginEmailOtp,} from "../lib/otp";
 import { writeAuditLog } from "../lib/audit";
 
 const loginUsername = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -246,17 +244,6 @@ loginUsername.post("/complete", async (c) => {
     user.email_verified &&
     !notifyEmail.endsWith("@rald.identity") &&
     !notifyEmail.endsWith("@loop.guest");
-
-  if (isRealEmail && c.env.RESEND_API_KEY) {
-    sendNewDeviceNotification(
-      notifyEmail!,
-      user.username as string,
-      ip,
-      c.env.RESEND_API_KEY,
-    ).catch(err => {
-      console.error("[login-username/complete] device notification failed:", String(err));
-    });
-  }
 
   // P4: check migration queue — does user need to claim a username?
   const needsUsername = !(user.username as string | null);
