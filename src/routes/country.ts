@@ -33,7 +33,7 @@ function statusMessage(status: string, countryName: string): string {
 // ── GET /country/:code — public country status ────────────────────────────────
 country.get("/:code", async (c) => {
   const db   = c.get("db");
-  const code = c.req.param("code").toUpperCase().slice(0, 2);
+  const code = (c.req.param("code") ?? "").toUpperCase().slice(0, 2);
 
   const { data, error } = await db
     .from("country_registry")
@@ -75,7 +75,7 @@ country.get("/:code", async (c) => {
 // Used by Loop, Civic Engine, Business Workspace to check feature access per country.
 country.get("/:code/access", async (c) => {
   const db   = c.get("db");
-  const code = c.req.param("code").toUpperCase().slice(0, 2);
+  const code = (c.req.param("code") ?? "").toUpperCase().slice(0, 2);
 
   const { data } = await db
     .from("country_registry")
