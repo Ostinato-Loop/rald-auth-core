@@ -28,9 +28,9 @@
 import { Hono } from "hono";
 import type { Bindings, Variables } from "../index";
 import { checkRateLimit, getClientIp, rateLimitResponse } from "../lib/rate-limit";
-import { signJwt } from "../lib/auth";
+import { signJwt, verifyJwt } from "../lib/auth";
 import { buildSessionCookie } from "../lib/cookie";
-import { verifySmsOtp, verifyOtpCode, sendWelcomeEmail } from "../lib/otp";
+import { verifySmsOtp, verifyOtpCode, hashOtpCode, sendWelcomeEmail } from "../lib/otp";
 import { writeAuditLog } from "../lib/audit";
 
 const registerUsername = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -230,7 +230,8 @@ registerUsername.post("/complete", async (c) => {
 
   type CompleteBody = {
     pending_user_id: string;
-    method:          "sms" | "email";
+    method?:         "sms" | "email";   // optional — auto-inferred from provided fields
+    sessionToken?:   string;             // JWT from /auth/send-login-email-otp (preferred email path)
     pinId?:          string;
     pin?:            string;
     phone?:          string;
@@ -242,12 +243,14 @@ registerUsername.post("/complete", async (c) => {
   };
 
   const body = await c.req.json<CompleteBody>().catch(() => null);
-  if (!body?.pending_user_id || !body.method) {
-    return c.json({ error: "pending_user_id and method are required" }, 400);
+  if (!body?.pending_user_id) {
+    return c.json({ error: "pending_user_id is required" }, 400);
   }
 
   const pendingUserId = body.pending_user_id;
-  const method        = body.method;
+  // Auto-infer method: sessionToken/code/email → email; pinId/pin → sms
+  const method: "sms" | "email" =
+    body.method ?? (body.pinId ? "sms" : "email");
 
   const userRl = await checkRateLimit(kv, {
     key: `otp-attempt:user:${pendingUserId}`, limit: 5, windowSeconds: 900,
@@ -323,55 +326,97 @@ registerUsername.post("/complete", async (c) => {
     });
 
   } else {
-    // email path
-    const email = body.email ?? "";
-    const code  = body.code  ?? "";
+    // ── Email verification path ──────────────────────────────────────────────
+    // Primary: sessionToken JWT from /auth/send-login-email-otp
+    // Fallback: DB lookup in auth_otp_codes (legacy / explicit email+code path)
 
-    if (!email || !code) {
-      return c.json({ error: "email and code are required for email verification" }, 400);
+    if (!body.code) {
+      return c.json({ error: "code is required for email verification" }, 400);
     }
+    const code = body.code.trim();
 
-    const cleanEmail = email.trim().toLowerCase();
+    if (body.sessionToken) {
+      // ── JWT-based verification (standard registration path) ──────────────
+      const session = await verifyJwt(body.sessionToken, c.env.RALD_JWT_SECRET) as
+        (Record<string, string> & { purpose?: string; codeHash?: string; email?: string }) | null;
 
-    // P1 fix: query by `purpose` (column now guaranteed to exist after migration)
-    const { data: otps } = await db
-      .from("auth_otp_codes")
-      .select("id,code_hash,expires_at,used")
-      .eq("email", cleanEmail)
-      .eq("purpose", "email-otp-login")
-      .eq("used", false)
-      .order("created_at", { ascending: false })
-      .limit(1);
+      if (!session || session.purpose !== "email-otp-login" || !session.codeHash) {
+        await writeAuditLog(db, {
+          userId, action: "otp_failed", ip, status: "failure",
+          metadata: { method: "email", reason: "invalid_session_token" },
+        });
+        return c.json({ error: "Invalid or expired email verification session. Request a new code." }, 400);
+      }
 
-    const otp = otps?.[0];
-    const expired = otp ? new Date(otp.expires_at as string) < new Date() : true;
+      const inputHash = await hashOtpCode(code);
+      if (inputHash !== session.codeHash) {
+        await writeAuditLog(db, {
+          userId, action: "otp_failed", ip, status: "failure",
+          metadata: { method: "email", reason: "wrong_code" },
+        });
+        return c.json({ error: "Incorrect code. Try again." }, 401);
+      }
 
-    if (!otp || expired) {
+      const sessionEmail = session.email ?? userEmail;
+      await db.from("auth_users")
+        .update({ email: sessionEmail, email_verified: true })
+        .eq("id", userId);
+
       await writeAuditLog(db, {
-        userId, action: "otp_failed", ip, status: "failure",
-        metadata: { method: "email", reason: !otp ? "not_found" : "expired" },
+        userId, action: "otp_verified", ip, status: "success",
+        metadata: { method: "email", stage: "complete-v2-jwt" },
       });
-      return c.json({ error: "Code expired or not found. Request a new one." }, 400);
-    }
 
-    const codeValid = await verifyOtpCode(code.trim(), otp.code_hash as string);
-    if (!codeValid) {
+      verifiedEmail = sessionEmail;
+
+    } else {
+      // ── DB-based fallback verification ────────────────────────────────────
+      const emailInput = (body.email ?? userEmail ?? "").trim().toLowerCase();
+      if (!emailInput) {
+        return c.json({ error: "email or sessionToken is required for email verification" }, 400);
+      }
+
+      const { data: otps } = await db
+        .from("auth_otp_codes")
+        .select("id,code_hash,expires_at,used")
+        .eq("email", emailInput)
+        .eq("purpose", "email-otp-login")
+        .eq("used", false)
+        .order("created_at", { ascending: false })
+        .limit(1);
+
+      const otp     = otps?.[0];
+      const expired = otp ? new Date(otp.expires_at as string) < new Date() : true;
+
+      if (!otp || expired) {
+        await writeAuditLog(db, {
+          userId, action: "otp_failed", ip, status: "failure",
+          metadata: { method: "email", reason: !otp ? "not_found" : "expired" },
+        });
+        return c.json({ error: "Code expired or not found. Request a new one." }, 400);
+      }
+
+      const codeValid = await verifyOtpCode(code, otp.code_hash as string);
+      if (!codeValid) {
+        await writeAuditLog(db, {
+          userId, action: "otp_failed", ip, status: "failure",
+          metadata: { method: "email", reason: "wrong_code" },
+        });
+        return c.json({ error: "Incorrect code. Try again." }, 401);
+      }
+
+      await db.from("auth_otp_codes").update({ used: true }).eq("id", otp.id);
+      await db.from("auth_users")
+        .update({ email: emailInput, email_verified: true })
+        .eq("id", userId);
+
       await writeAuditLog(db, {
-        userId, action: "otp_failed", ip, status: "failure",
-        metadata: { method: "email", reason: "wrong_code" },
+        userId, action: "otp_verified", ip, status: "success",
+        metadata: { method: "email", stage: "complete-v2-db" },
       });
-      return c.json({ error: "Incorrect code. Try again." }, 401);
+
+      verifiedEmail = emailInput;
     }
-
-    await db.from("auth_otp_codes").update({ used: true }).eq("id", otp.id);
-    await db.from("auth_users").update({ email: cleanEmail, email_verified: true }).eq("id", userId);
-
-    await writeAuditLog(db, {
-      userId, action: "otp_verified", ip, status: "success",
-      metadata: { method: "email", stage: "complete-v2" },
-    });
-
-    verifiedEmail = cleanEmail;
   }
 
   // ── P1 fix: Auto-create auth_user_profiles (ensures profile exists immediately) ──
