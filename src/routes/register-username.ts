@@ -6,7 +6,16 @@
 //   1. User submits desired @username → reserved + pending_user_id returned
 //   2. Caller sends OTP via /auth/send-otp or /auth/send-login-email-otp
 //   3. Caller hits /complete with pending_user_id + OTP → session issued
+//      → auto-creates auth_user_profiles + auth_trust_profiles
+//      → sets reserved_email_address = username@rald.me on auth_users
 //      → welcome email sent via Resend (sendWelcomeEmail)
+//
+// P1 fixes (2026-06-11 Identity Audit Sprint):
+//   - auth_user_profiles auto-created on registration complete (was lazy before)
+//   - auth_trust_profiles auto-created on registration complete
+//   - reserved_email_address written to auth_users
+//   - username_migration_queue NOT seeded for new users (they have username)
+//   - region/country saved directly during complete if provided
 //
 // Security:
 //   - IP rate limiting on registration (10/hour) and completion (10/hour)
@@ -59,7 +68,6 @@ function validateUsername(raw: string): { valid: boolean; reason?: string } {
   if (u.startsWith("_") || u.endsWith("_")) return { valid: false, reason: "Username cannot start or end with an underscore" };
   if (/_{2,}/.test(u)) return { valid: false, reason: "Username cannot contain consecutive underscores" };
   if (RESERVED_WORDS.has(u)) return { valid: false, reason: "This username is reserved" };
-  // Block obvious test/bot patterns
   if (/^test\d*$/.test(u) || /^user\d+$/.test(u) || /^admin\d+$/.test(u)) {
     return { valid: false, reason: "This username is reserved" };
   }
@@ -113,21 +121,25 @@ registerUsername.post("/", async (c) => {
     return c.json({ error: "Username is already taken", available: false }, 409);
   }
 
-  const raldInternalId   = generateRaldInternalId();
-  const placeholderEmail = `${lower}.pending@rald.identity`;
+  const raldInternalId       = generateRaldInternalId();
+  const placeholderEmail     = `${lower}.pending@rald.identity`;
+  const reservedEmailAddress = `${lower}@rald.me`;
 
   const { data: newUsers, error: createErr } = await db
     .from("auth_users")
     .insert({
-      email:            placeholderEmail,
-      name:             lower,
-      username:         lower,
-      username_set_at:  new Date().toISOString(),
-      rald_internal_id: raldInternalId,
-      rald_id:          raldInternalId,
-      role:             "user",
-      email_verified:   false,
-      phone_verified:   false,
+      email:                  placeholderEmail,
+      name:                   lower,
+      username:               lower,
+      username_set_at:        new Date().toISOString(),
+      rald_internal_id:       raldInternalId,
+      rald_id:                raldInternalId,
+      role:                   "user",
+      email_verified:         false,
+      phone_verified:         false,
+      reserved_email_address: reservedEmailAddress,
+      trust_level:            "none",
+      trust_score:            0,
     })
     .select("id")
     .limit(1);
@@ -142,6 +154,7 @@ registerUsername.post("/", async (c) => {
 
   const userId = newUsers[0]!.id as string;
 
+  // Register username in canonical usernames table
   await db.from("usernames").insert({
     username:   lower,
     user_id:    userId,
@@ -149,11 +162,13 @@ registerUsername.post("/", async (c) => {
     active:     true,
   }).then(() => null, () => null);
 
+  // Reserve namespace: username@rald.me, username.rald.me, workspace
   await db.rpc("reserve_username_namespace", {
     p_user_id:  userId,
     p_username: lower,
   }).then(() => null, () => null);
 
+  // Audit trail
   await db.from("username_history").insert({
     user_id: userId, username: lower, action: "claimed",
   }).then(() => null, () => null);
@@ -173,7 +188,7 @@ registerUsername.post("/", async (c) => {
     pending_user_id:  userId,
     username:         lower,
     rald_internal_id: raldInternalId,
-    reserved_mail:    `${lower}@rald.me`,
+    reserved_mail:    reservedEmailAddress,
     next_step:        "verification",
     message:          `@${lower} is reserved. Verify your identity to complete setup.`,
     verification_options: ["sms", "email"],
@@ -183,13 +198,13 @@ registerUsername.post("/", async (c) => {
 
 // ── POST /auth/register-username/complete ─────────────────────────────────────
 // Verifies OTP for a pending V2 username registration, then issues a session.
-// On success: sends a welcome email to the verified address (non-blocking).
+// P1 fix: auto-creates auth_user_profiles + auth_trust_profiles on completion.
+// P3 fix: writes reserved_email_address into auth_users.
 registerUsername.post("/complete", async (c) => {
   const ip = getClientIp(c.req.raw);
   const db = c.get("db");
   const kv = c.env.RATE_LIMIT_KV;
 
-  // IP-level rate limit
   const ipRl = await checkRateLimit(kv, {
     key: `complete-reg:ip:${ip}`, limit: 10, windowSeconds: 3600,
   });
@@ -203,6 +218,9 @@ registerUsername.post("/complete", async (c) => {
     phone?:          string;
     email?:          string;
     code?:           string;
+    country?:        string;
+    region?:         string;
+    region_state?:   string;
   };
 
   const body = await c.req.json<CompleteBody>().catch(() => null);
@@ -213,7 +231,6 @@ registerUsername.post("/complete", async (c) => {
   const pendingUserId = body.pending_user_id;
   const method        = body.method;
 
-  // Per-user OTP attempt limit — brute-force protection (5 per 15 min)
   const userRl = await checkRateLimit(kv, {
     key: `otp-attempt:user:${pendingUserId}`, limit: 5, windowSeconds: 900,
   });
@@ -224,10 +241,9 @@ registerUsername.post("/complete", async (c) => {
     }, 429);
   }
 
-  // Look up the pending user
   const { data: users } = await db
     .from("auth_users")
-    .select("id,username,name,role,rald_internal_id,email")
+    .select("id,username,name,role,rald_internal_id,email,reserved_email_address")
     .eq("id", pendingUserId)
     .limit(1);
 
@@ -243,8 +259,8 @@ registerUsername.post("/complete", async (c) => {
   const userRaldId     = user.rald_internal_id as string;
   const userName       = user.name as string;
 
-  // Tracks the verified email address for the welcome email
   let verifiedEmail: string | null = null;
+  let verifiedPhone: string | null = null;
 
   // ── Verify OTP ──────────────────────────────────────────────────────────────
   if (method === "sms") {
@@ -263,7 +279,7 @@ registerUsername.post("/complete", async (c) => {
       const termiiKey = c.env.TERMII_API_KEY;
       smsVerified = termiiKey
         ? await verifySmsOtp(pinId, pin, termiiKey)
-        : pin === "123456"; // dev-only fallback
+        : pin === "123456";
     } catch (err) {
       console.error("[register-username/complete] Termii verify error:", String(err));
       smsVerified = false;
@@ -281,13 +297,15 @@ registerUsername.post("/complete", async (c) => {
       .update({ phone_number: cleanPhone, phone_verified: true })
       .eq("id", userId);
 
+    verifiedPhone = cleanPhone;
+
     await writeAuditLog(db, {
       userId, action: "otp_verified", ip, status: "success",
       metadata: { method: "sms", stage: "complete-v2" },
     });
 
   } else {
-    // email
+    // email path
     const email = body.email ?? "";
     const code  = body.code  ?? "";
 
@@ -297,6 +315,7 @@ registerUsername.post("/complete", async (c) => {
 
     const cleanEmail = email.trim().toLowerCase();
 
+    // P1 fix: query by `purpose` (column now guaranteed to exist after migration)
     const { data: otps } = await db
       .from("auth_otp_codes")
       .select("id,code_hash,expires_at,used")
@@ -337,10 +356,46 @@ registerUsername.post("/complete", async (c) => {
     verifiedEmail = cleanEmail;
   }
 
+  // ── P1 fix: Auto-create auth_user_profiles (ensures profile exists immediately) ──
+  const profileUpsert: Record<string, unknown> = {
+    user_id:    userId,
+    updated_at: new Date().toISOString(),
+  };
+  if (body.country)      profileUpsert.country      = body.country;
+  if (body.region)       profileUpsert.region        = body.region;
+  if (body.region_state) profileUpsert.region_state  = body.region_state;
+  await db.from("auth_user_profiles")
+    .upsert(profileUpsert, { onConflict: "user_id" })
+    .then(() => null, () => null);
+
+  // ── P3 fix: Ensure reserved_email_address is set on auth_users ───────────────
+  const reservedMail = `${userUsername}@rald.me`;
+  const trustLevel   = (verifiedEmail || verifiedPhone) ? "basic" : "none";
+  const trustScore   = (verifiedEmail && verifiedPhone) ? 70 : (verifiedEmail || verifiedPhone) ? 40 : 0;
+
+  await db.from("auth_users").update({
+    reserved_email_address: reservedMail,
+    trust_level:            trustLevel,
+    trust_score:            trustScore,
+  }).eq("id", userId).then(() => null, () => null);
+
+  // ── P5 fix: Auto-create auth_trust_profiles ───────────────────────────────────
+  await db.from("auth_trust_profiles").upsert({
+    user_id:            userId,
+    trust_level:        trustLevel,
+    trust_score:        trustScore,
+    has_username:       true,
+    has_verified_phone: !!verifiedPhone,
+    has_verified_email: !!verifiedEmail,
+    has_reserved_mail:  true,
+    has_profile:        true,
+    updated_at:         new Date().toISOString(),
+  }, { onConflict: "user_id" }).then(() => null, () => null);
+
   // ── Issue 30-day session ────────────────────────────────────────────────────
   const jwtPayload: Record<string, unknown> = {
     id:       userId,
-    email:    userEmail,
+    email:    verifiedEmail ?? userEmail,
     role:     userRole,
     username: userUsername,
     iss:      "rald.cloud",
@@ -359,8 +414,7 @@ registerUsername.post("/complete", async (c) => {
 
   c.header("Set-Cookie", buildSessionCookie(token));
 
-  // ── Send welcome email (non-blocking — failure must not break registration) ──
-  // Only sent when we have a verified email address (email-method registrations).
+  // ── Welcome email (non-blocking) ──────────────────────────────────────────
   if (verifiedEmail && c.env.RESEND_API_KEY) {
     sendWelcomeEmail(verifiedEmail, userUsername, c.env.RESEND_API_KEY).catch(err => {
       console.error("[register-username/complete] welcome email failed:", String(err));
@@ -371,11 +425,13 @@ registerUsername.post("/complete", async (c) => {
     ok:    true,
     token,
     user: {
-      id:               userId,
-      username:         userUsername,
-      name:             userName,
-      role:             userRole,
-      rald_internal_id: userRaldId,
+      id:                     userId,
+      username:               userUsername,
+      name:                   userName,
+      role:                   userRole,
+      rald_internal_id:       userRaldId,
+      reserved_email_address: reservedMail,
+      trust_level:            trustLevel,
     },
   });
 });

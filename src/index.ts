@@ -1,5 +1,12 @@
 // RALD Auth Core — Cloudflare Worker
-// Deployed at: auth.rald.cloud | Version: 2.3.0
+// Deployed at: auth.rald.cloud | Version: 2.7.0
+// Changelog v2.7.0: Identity Audit & Username Ownership Sprint (P1–P6)
+//   - P1: Email OTP fixed (purpose column migration), profiles auto-created on register
+//   - P2: Username change policy added (/username/change, 30-day cooldown)
+//   - P3: reserved_email_address stored in auth_users at claim time
+//   - P4: needs_username flag in login response, /migration routes for claim flow
+//   - P5: identity_registry view, repair_identity_records() RPC, /migration/registry-check
+//   - P6: /profiles/me returns smart_fill data, never loses existing regional data
 // Changelog v2.6.0: QR Code Login + WebAuthn/Face Auth end-to-end
 // Changelog v2.5.0: V2 Username-First Identity — /username, /auth/register-username, /recovery
 // Changelog v2.3.0: Phase H.2 — Privacy Center, Verification Engine, Role Engine, Ecosystem Events
@@ -30,7 +37,8 @@ import recoveryRoutes           from "./routes/recovery";
 import qrRoutes                 from "./routes/qr";
 import webauthnRoutes           from "./routes/webauthn";
 import metricsRoutes            from "./routes/metrics";
-import loginUsernameRoute        from "./routes/login-username";
+import loginUsernameRoute       from "./routes/login-username";
+import migrationRoutes          from "./routes/migration";
 
 export type Bindings = {
   SUPABASE_URL:              string;
@@ -51,7 +59,7 @@ export type Variables = {
   user?: JwtPayload;
 };
 
-const VERSION = "2.6.0";
+const VERSION = "2.7.0";
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -89,7 +97,6 @@ const STATIC_ORIGINS = new Set([
 
 function isAllowedOrigin(origin: string): boolean {
   if (STATIC_ORIGINS.has(origin)) return true;
-  // Replit preview/published domains — covers *.replit.app and *.replit.dev
   if (/^https:\/\/[a-z0-9-]+\.replit\.(app|dev)$/.test(origin)) return true;
   return false;
 }
@@ -150,7 +157,7 @@ app.get("/ready", (c) =>
       rate_limit_kv: !!(c.env.RATE_LIMIT_KV),
       session_kv:    !!(c.env.RALD_SESSION_KV),
     },
-    phase: "H.2 — Privacy + Verification + Roles + Security Hardening",
+    phase: "V2.7 — Identity Audit & Username Ownership Sprint",
     ...serviceInfo(c),
   })
 );
@@ -162,17 +169,25 @@ app.get("/system/status", (c) =>
     identity_hub: "profiles.rald.cloud",
     environment:  c.env.ENVIRONMENT ?? "production",
     features: {
-      auth:               "✓ login, register, OTP, password reset",
-      sessions:           "✓ create, revoke, revoke-all",
+      auth:               "✓ login, register, OTP (email+SMS), password reset",
+      username:           "✓ check, claim, change (30-day policy), migration flow",
+      sessions:           "✓ create, revoke, revoke-all, device revoke",
       devices:            "✓ list, remove, trust",
-      sso:                "✓ exchange, clerk-exchange",
-      profiles:           "✓ me, update, apps, organizations, audit-logs, verification",
+      sso:                "✓ exchange, clerk-exchange, silent SSO",
+      profiles:           "✓ me, update (incl. region/country), apps, identity, sessions, activity",
       privacy:            "✓ me, export, permissions, delete-request, cancel-deletion",
       verification:       "✓ status, apply, withdraw, badge",
       roles:              "✓ all, me, request, capabilities",
       search:             "✓ users, related",
       graph:              "✓ identity graph, mutual connections, suggestions",
+      migration:          "✓ identity-status, claim-username, repair, registry-check (admin)",
       security_headers:   "✓ HSTS, CSP, X-Frame-Options, Referrer-Policy",
+      // P1–P6 sprint
+      email_otp_fix:      "✓ purpose column added — email OTP now works",
+      reserved_mail:      "✓ username@rald.me reserved at claim time",
+      trust_profiles:     "✓ auto-created on registration complete",
+      identity_registry:  "✓ identity_registry view + repair_identity_records()",
+      smart_profiles:     "✓ /profiles/me never loses regional data",
     },
     timestamp: new Date().toISOString(),
   })
@@ -224,25 +239,26 @@ app.get("/system/dependencies", async (c) => {
 });
 
 // ── Routes ────────────────────────────────────────────────────────────────────
-app.route("/auth",        authRoutes);
-app.route("/devices",     devicesRoutes);
-app.route("/sso",         ssoRoutes);
-app.route("/sso",         clerkRoutes);
-app.route("/provision",   provisionRoutes);
-app.route("/profiles",    profilesRoutes);
-app.route("/search",      searchRoutes);
-app.route("/graph",       graphRoutes);
-app.route("/privacy",     privacyRoutes);
-app.route("/verify",      verificationEngineRoutes);
-app.route("/roles",       rolesRoutes);
-app.route("/username",     usernameRoutes);
+app.route("/auth",                   authRoutes);
+app.route("/devices",                devicesRoutes);
+app.route("/sso",                    ssoRoutes);
+app.route("/sso",                    clerkRoutes);
+app.route("/provision",              provisionRoutes);
+app.route("/profiles",               profilesRoutes);
+app.route("/search",                 searchRoutes);
+app.route("/graph",                  graphRoutes);
+app.route("/privacy",                privacyRoutes);
+app.route("/verify",                 verificationEngineRoutes);
+app.route("/roles",                  rolesRoutes);
+app.route("/username",               usernameRoutes);
 app.route("/auth/register-username", registerUsernameRoute);
-app.route("/auth/login-username",  loginUsernameRoute);
-app.route("/recovery",    recoveryRoutes);
-app.route("/auth/qr",       qrRoutes);
-app.route("/auth/webauthn", webauthnRoutes);
-app.route("/admin/metrics", metricsRoutes);
-app.route("/",            sessionRoutes);
+app.route("/auth/login-username",    loginUsernameRoute);
+app.route("/recovery",               recoveryRoutes);
+app.route("/auth/qr",                qrRoutes);
+app.route("/auth/webauthn",          webauthnRoutes);
+app.route("/admin/metrics",          metricsRoutes);
+app.route("/migration",              migrationRoutes);
+app.route("/",                       sessionRoutes);
 
 // ── Root ──────────────────────────────────────────────────────────────────────
 app.get("/", (c) => c.json({

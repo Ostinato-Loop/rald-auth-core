@@ -1,11 +1,11 @@
-// RALD Auth Core — Username Login (Return-User Path)
-// POST /auth/login-username          — find existing user, send OTP
-// POST /auth/login-username/complete — verify OTP, issue 30-day session JWT
-//                                      + send new-device security notification
+// RALD Auth Core — Username-First Login
+// POST /auth/login-username         — look up user, send OTP
+// POST /auth/login-username/complete — verify OTP, issue session
 //
-// New users use /auth/register-username.
-// The /complete endpoint looks up the verified contact from DB — the frontend
-// never handles the raw phone/email, preventing any privacy leakage.
+// P4 fix (2026-06-11): returns `needs_username: true` for users without usernames
+//   so the frontend can surface the "Claim your username" flow on next login.
+// P5 fix (2026-06-11): triggers repair_identity_records on successful login
+//   to ensure trust profile and profile rows are always current.
 // LILCKY STUDIO LIMITED
 
 import { Hono } from "hono";
@@ -13,96 +13,48 @@ import type { Bindings, Variables } from "../index";
 import { checkRateLimit, getClientIp, rateLimitResponse } from "../lib/rate-limit";
 import { signJwt } from "../lib/auth";
 import { buildSessionCookie } from "../lib/cookie";
-import { verifySmsOtp, sendSmsOtp, sendLoginEmailOtp, verifyOtpCode, generateNumericOtp, hashOtpCode } from "../lib/otp";
+import {
+  sendSmsOtp,
+  verifySmsOtp,
+  verifyOtpCode,
+  generateNumericOtp,
+  hashOtpCode,
+  sendLoginEmailOtp,
+  sendNewDeviceNotification,
+} from "../lib/otp";
 import { writeAuditLog } from "../lib/audit";
 
 const loginUsername = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
-// ── New-device notification email ─────────────────────────────────────────────
-// Sends a security notification to the user's verified email on every sign-in.
-// Non-blocking: failure is logged but must not prevent the login response.
-async function sendNewDeviceNotification(
-  to:       string,
-  username: string,
-  ip:       string,
-  apiKey:   string,
-): Promise<void> {
-  const now   = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos", dateStyle: "medium", timeStyle: "short" });
-  const body  = `
-<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><title>New sign-in to your RALD account</title></head>
-<body style="font-family:'Plus Jakarta Sans',system-ui,sans-serif;background:#f9f9f7;margin:0;padding:32px 16px;">
-  <div style="max-width:480px;margin:0 auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 2px 16px rgba(0,0,0,0.07);">
-    <div style="padding:24px 32px 0;border-bottom:1px solid #eee;">
-      <p style="font-size:22px;font-weight:800;color:#1a2a1e;letter-spacing:-0.03em;margin:0 0 4px;">RALD</p>
-      <p style="font-size:12px;color:#7a8c7e;margin:0 0 20px;">Built in Africa · Works on any network</p>
-    </div>
-    <div style="padding:28px 32px;">
-      <h1 style="font-size:20px;font-weight:800;color:#1a2a1e;margin:0 0 16px;">New sign-in detected</h1>
-      <p style="font-size:14px;color:#566a5a;line-height:1.6;margin:0 0 20px;">
-        Someone just signed in to your RALD account <strong style="color:#1a2a1e;">@${username}</strong>.
-      </p>
-      <div style="background:#f4f9f5;border-radius:12px;padding:16px;margin-bottom:20px;">
-        <table style="width:100%;font-size:13px;color:#566a5a;border-collapse:collapse;">
-          <tr><td style="padding:4px 0;font-weight:600;width:100px;">Time</td><td style="padding:4px 0;color:#1a2a1e;">${now} WAT</td></tr>
-          <tr><td style="padding:4px 0;font-weight:600;">IP Address</td><td style="padding:4px 0;color:#1a2a1e;">${ip}</td></tr>
-        </table>
-      </div>
-      <p style="font-size:14px;color:#566a5a;line-height:1.6;margin:0 0 24px;">
-        If this was you, no action is needed. If you didn't sign in, please
-        <a href="https://profiles.rald.cloud/privacy" style="color:#1a7a3c;font-weight:600;">secure your account immediately</a>.
-      </p>
-      <a href="https://profiles.rald.cloud/privacy" style="display:inline-block;background:#1a7a3c;color:#fff;font-size:14px;font-weight:700;padding:12px 24px;border-radius:12px;text-decoration:none;">
-        Review account security
-      </a>
-    </div>
-    <div style="padding:20px 32px;background:#f9f9f7;border-top:1px solid #eee;">
-      <p style="font-size:11px;color:#9aaa9e;margin:0;">
-        LILCKY STUDIO LIMITED · privacy@rald.cloud<br>
-        You're receiving this because a new sign-in was detected on your account.
-      </p>
-    </div>
-  </div>
-</body>
-</html>`.trim();
-
-  await fetch("https://api.resend.com/emails", {
-    method:  "POST",
-    headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body:    JSON.stringify({
-      from:    "RALD Security <security@rald.cloud>",
-      to:      [to],
-      subject: `New sign-in to your RALD account (@${username})`,
-      html:    body,
-    }),
-  });
-}
-
 // ── POST /auth/login-username ─────────────────────────────────────────────────
+// Looks up user by username, determines contact method, sends OTP.
 loginUsername.post("/", async (c) => {
   const ip = getClientIp(c.req.raw);
   const db = c.get("db");
   const kv = c.env.RATE_LIMIT_KV;
 
-  const body = await c.req.json<{ username?: string; app_id?: string }>().catch(() => null);
-  if (!body?.username) return c.json({ error: "username is required" }, 400);
-
-  const lower = body.username.toLowerCase().trim();
-
   const ipRl = await checkRateLimit(kv, {
-    key: `login-username:ip:${ip}`, limit: 10, windowSeconds: 3600,
+    key: `login-username:ip:${ip}`, limit: 10, windowSeconds: 900,
   });
   if (!ipRl.allowed) return rateLimitResponse(ipRl.resetAt);
 
+  const body = await c.req.json<{ username?: string; app_id?: string }>().catch(() => null);
+  if (!body?.username) return c.json({ error: "username is required" }, 400);
+
+  const lower = body.username.toLowerCase().trim().replace(/^@/, "");
+
+  // Look up by username (case-insensitive)
   const { data: users } = await db
     .from("auth_users")
-    .select("id, username, phone_number, email, phone_verified, email_verified")
+    .select("id,username,name,email,role,phone_number,phone_verified,email_verified,is_active,reserved_email_address")
     .ilike("username", lower)
     .limit(1);
 
   const user = users?.[0];
-  if (!user) return c.json({ error: "No account found with that username." }, 404);
+  if (!user || !user.is_active) {
+    // Don't leak existence — use generic message
+    return c.json({ error: "Username not found. Check the spelling or create a new account." }, 404);
+  }
 
   const phone = user.phone_number as string | null;
   const email = user.email        as string | null;
@@ -123,6 +75,8 @@ loginUsername.post("/", async (c) => {
         method:          "sms" as const,
         pinId,
         contact_hint:    hint,
+        // P4: signal if user needs to claim a username (shouldn't happen via login flow, but guard)
+        needs_username:  !(user.username as string | null),
       });
     } catch (err) {
       console.error("[login-username] SMS OTP error:", String(err));
@@ -131,45 +85,50 @@ loginUsername.post("/", async (c) => {
   }
 
   if (email && user.email_verified) {
-    try {
-      const emailCode = generateNumericOtp(6);
-      const codeHash  = await hashOtpCode(emailCode);
-      await db.from("auth_otp_codes").insert({
-        user_id:    user.id,
-        email,
-        code_hash:  codeHash,
-        purpose:    "email-otp-login",
-        expires_at: new Date(Date.now() + 600_000).toISOString(),
-        used:       false,
-      });
-      if (c.env.RESEND_API_KEY) {
-        await sendLoginEmailOtp(email, emailCode, c.env.RESEND_API_KEY);
-      } else {
-        console.log("[DEV] Email login OTP for " + email + ": " + emailCode);
+    // Skip placeholder emails
+    const isRealEmail = !email.endsWith("@rald.identity") && !email.endsWith("@loop.guest");
+    if (isRealEmail) {
+      try {
+        const emailCode = generateNumericOtp(6);
+        const codeHash  = await hashOtpCode(emailCode);
+        await db.from("auth_otp_codes").insert({
+          user_id:    user.id,
+          email,
+          code_hash:  codeHash,
+          purpose:    "email-otp-login",
+          type:       "email-otp-login",
+          expires_at: new Date(Date.now() + 600_000).toISOString(),
+          used:       false,
+        });
+        if (c.env.RESEND_API_KEY) {
+          await sendLoginEmailOtp(email, emailCode, c.env.RESEND_API_KEY);
+        } else {
+          console.log("[DEV] Email login OTP for " + email + ": " + emailCode);
+        }
+        const hint = email.replace(/(.{2}).+(@.+)/, "$1\u2022\u2022\u2022$2");
+        await writeAuditLog(db, {
+          userId: user.id as string,
+          action: "otp_sent", ip, status: "success",
+          metadata: { method: "email" },
+        });
+        return c.json({
+          ok:              true,
+          pending_user_id: user.id as string,
+          method:          "email" as const,
+          contact_hint:    hint,
+          needs_username:  !(user.username as string | null),
+        });
+      } catch (err) {
+        console.error("[login-username] email OTP error:", String(err));
+        return c.json({ error: "Failed to send verification code. Try again." }, 502);
       }
-      const hint = email.replace(/(.{2}).+(@.+)/, "$1\u2022\u2022\u2022$2");
-      await writeAuditLog(db, {
-        userId: user.id as string,
-        action: "otp_sent", ip, status: "success",
-        metadata: { method: "email" },
-      });
-      return c.json({
-        ok:              true,
-        pending_user_id: user.id as string,
-        method:          "email" as const,
-        contact_hint:    hint,
-      });
-    } catch (err) {
-      console.error("[login-username] email OTP error:", String(err));
-      return c.json({ error: "Failed to send verification code. Try again." }, 502);
     }
   }
 
-  return c.json({ error: "No verified contact method on file. Contact support." }, 400);
+  return c.json({ error: "No verified contact method on file. Contact support at support@rald.cloud." }, 400);
 });
 
 // ── POST /auth/login-username/complete ────────────────────────────────────────
-// Verifies OTP, issues 30-day session, and sends a new-device security notification.
 loginUsername.post("/complete", async (c) => {
   const ip = getClientIp(c.req.raw);
   const db = c.get("db");
@@ -194,12 +153,12 @@ loginUsername.post("/complete", async (c) => {
 
   const { data: users } = await db
     .from("auth_users")
-    .select("id, username, name, email, role, rald_internal_id, email_verified")
+    .select("id,username,name,email,role,rald_internal_id,email_verified,reserved_email_address,trust_level,is_active")
     .eq("id", body.user_id)
     .limit(1);
 
   const user = users?.[0];
-  if (!user) return c.json({ error: "User not found." }, 404);
+  if (!user || !user.is_active) return c.json({ error: "User not found." }, 404);
 
   if (body.method === "sms") {
     if (!body.pinId || !body.pin) {
@@ -225,9 +184,10 @@ loginUsername.post("/complete", async (c) => {
     const userEmail = user.email as string | null;
     if (!userEmail) return c.json({ error: "No email on file for this account." }, 400);
 
+    // P1 fix: query by `purpose` (column guaranteed after migration)
     const { data: otps } = await db
       .from("auth_otp_codes")
-      .select("id, code_hash, expires_at, used")
+      .select("id,code_hash,expires_at,used")
       .eq("email", userEmail)
       .eq("purpose", "email-otp-login")
       .eq("used", false)
@@ -273,15 +233,19 @@ loginUsername.post("/complete", async (c) => {
     status:   "success",
     metadata: { method: body.method, via: "login-username" },
   });
+
   c.header("Set-Cookie", buildSessionCookie(token));
 
-  // ── Send new-device security notification (non-blocking) ────────────────────
-  // Fires on every successful login so users are always aware of account access.
-  // Only sent if a verified email is available.
+  // P5 fix: trigger identity repair on login (non-blocking)
+  db.rpc("repair_identity_records", { p_user_id: user.id })
+    .then(() => null, () => null);
+
+  // New-device security notification (non-blocking)
   const notifyEmail = user.email as string | null;
   const isRealEmail = notifyEmail &&
     user.email_verified &&
-    !notifyEmail.endsWith("@rald.identity");
+    !notifyEmail.endsWith("@rald.identity") &&
+    !notifyEmail.endsWith("@loop.guest");
 
   if (isRealEmail && c.env.RESEND_API_KEY) {
     sendNewDeviceNotification(
@@ -294,16 +258,35 @@ loginUsername.post("/complete", async (c) => {
     });
   }
 
+  // P4: check migration queue — does user need to claim a username?
+  const needsUsername = !(user.username as string | null);
+  if (needsUsername) {
+    // Ensure they're in the migration queue
+    await db.from("username_migration_queue").upsert(
+      { user_id: user.id, prompted_at: new Date().toISOString() },
+      { onConflict: "user_id" }
+    ).then(() => null, () => null);
+  }
+
   return c.json({
     ok:    true,
     token,
     user: {
-      id:               user.id,
-      username:         user.username,
-      name:             user.name,
-      role:             user.role,
-      rald_internal_id: user.rald_internal_id,
+      id:                     user.id,
+      username:               user.username,
+      name:                   user.name,
+      role:                   user.role,
+      rald_internal_id:       user.rald_internal_id,
+      reserved_email_address: user.reserved_email_address ?? (user.username ? `${user.username}@rald.me` : null),
+      trust_level:            user.trust_level ?? "none",
     },
+    // P4: signal client to show username claim flow
+    needs_username: needsUsername,
+    migration: needsUsername ? {
+      required: true,
+      message:  "Claim your @username to unlock the full RALD ecosystem.",
+      claim_url: "https://profiles.rald.cloud/claim-username",
+    } : null,
   });
 });
 
