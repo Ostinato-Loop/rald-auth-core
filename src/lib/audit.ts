@@ -28,6 +28,11 @@ export type AuditAction =
   // Devices
   | "device_trusted"
   | "device_revoked"
+  // Token lifecycle
+  | "token_refreshed"
+  // Profile
+  | "profile_updated"
+  | "profile_viewed"
   // SSO & Provisioning
   | "sso_exchange"
   | "sso_handoff_issued"
