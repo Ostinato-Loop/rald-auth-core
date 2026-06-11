@@ -47,7 +47,7 @@ country.get("/:code", async (c) => {
       country_code: code,
       status:       "WAITLIST",
       available:    false,
-      message:      `RALD is not active in your country yet. Join the waitlist and help bring RALD to your region.`,
+      message:      "RALD is not active in your country yet. Join the waitlist and help bring RALD to your region.",
     });
   }
 
@@ -207,10 +207,10 @@ country.get("/", async (c) => {
 
   for (const row of data ?? []) {
     if (!row) continue;
-    if (row.status === "ACTIVE")                      grouped["active"]!.push(row);
-    else if (["PUBLIC_BETA","PRIVATE_BETA"].includes(row.status)) grouped["beta"]!.push(row);
-    else if (["PREVIEW"].includes(row.status))        grouped["coming_soon"]!.push(row);
-    else                                              grouped["waitlist"]!.push(row);
+    if (row.status === "ACTIVE")                      grouped.active!.push(row);
+    else if (["PUBLIC_BETA","PRIVATE_BETA"].includes(row.status)) grouped.beta!.push(row);
+    else if (["PREVIEW"].includes(row.status))        grouped.coming_soon!.push(row);
+    else                                              grouped.waitlist!.push(row);
   }
 
   return c.json({ ok: true, countries: grouped, total: (data ?? []).length });
