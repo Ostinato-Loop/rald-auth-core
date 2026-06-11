@@ -47,7 +47,7 @@ function validateUsernameFormat(u: string): { valid: boolean; reason?: string } 
   return { valid: true };
 }
 
-async function isUsernameTaken(db: ReturnType<typeof import("../index")["default"]["fetch"]> extends never ? never : Parameters<Parameters<typeof import("../index")["default"]["fetch"]>[0]["json"]>[0] extends never ? never : unknown, lower: string): Promise<boolean> {
+async function isUsernameTaken(db: unknown, lower: string): Promise<boolean> {
   // We can't import the db type cleanly here, so we accept any
   return false;
 }
