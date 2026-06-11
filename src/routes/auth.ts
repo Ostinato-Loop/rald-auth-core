@@ -255,11 +255,17 @@ auth.post("/send-otp", async (c) => {
     await writeAuditLog(db, { action: "otp_sent", ip, status: "success", metadata: { phone, channel: "termii" } });
     return c.json({ pinId, message: "Verification code sent" });
   } catch (err: unknown) {
+    const isUnavailable = err instanceof Error && err.message === "SMS_UNAVAILABLE";
     console.error("SMS OTP error:", err);
     await writeAuditLog(db, { action: "otp_sent", ip, status: "failure", metadata: { phone, error: String(err) } });
     return c.json(
-      { error: err instanceof Error ? err.message : "Failed to send code. Try again." },
-      502
+      {
+        error: isUnavailable
+          ? "SMS is temporarily unavailable. Please choose email verification instead."
+          : "Could not send verification code. Please try again or use email.",
+        sms_unavailable: true,
+      },
+      503,
     );
   }
 });
