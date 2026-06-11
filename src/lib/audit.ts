@@ -82,7 +82,13 @@ export type AuditAction =
   // Organizations — Phase H
   | "organization_created"
   | "organization_left"
-  | "organization_deleted";
+  | "organization_deleted"
+  // Country Activation Framework
+  | "country_activated"
+  | "country_restricted"
+  | "country_status_changed"
+  | "country_added"
+  | "payrald_gate_updated";
 
 export interface AuditEntry {
   userId?: string | null;
