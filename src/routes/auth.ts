@@ -764,6 +764,5 @@ auth.post("/refresh", async (c) => {
     expires_at:  new Date(Date.now() + 86_400 * 1_000).toISOString(),
   });
 });
-});
 
 export default auth;
