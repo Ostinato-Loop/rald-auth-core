@@ -37,6 +37,8 @@ import metricsRoutes            from "./routes/metrics";
 import loginUsernameRoute       from "./routes/login-username";
 import migrationRoutes          from "./routes/migration";
 import loopAuthRoutes           from "./routes/loop-auth";
+import countryRoutes            from "./routes/country";
+import expansionRoutes          from "./routes/expansion";
 
 export type Bindings = {
   SUPABASE_URL:              string;
@@ -180,6 +182,8 @@ app.get("/system/status", (c) =>
       search:             "✓ users, related",
       graph:              "✓ identity graph, mutual connections, suggestions",
       migration:          "✓ identity-status, claim-username, repair, registry-check (admin)",
+      country_activation: "✓ /country/:code status, /country/waitlist join, /country/:code/access gates",
+      expansion_admin:    "✓ /admin/expansion list, transition pipeline, emergency restrict, PayRald gate, scorecard",
       security_headers:   "✓ HSTS, CSP, X-Frame-Options, Referrer-Policy",
     },
     timestamp: new Date().toISOString(),
@@ -251,7 +255,9 @@ app.route("/recovery",               recoveryRoutes);
 app.route("/auth/qr",                qrRoutes);
 app.route("/auth/webauthn",          webauthnRoutes);
 app.route("/admin/metrics",          metricsRoutes);
+app.route("/admin/expansion",        expansionRoutes);
 app.route("/migration",              migrationRoutes);
+app.route("/country",                countryRoutes);
 app.route("/",                       sessionRoutes);
 
 // ── Root ──────────────────────────────────────────────────────────────────────
