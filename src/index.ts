@@ -39,6 +39,8 @@ import migrationRoutes          from "./routes/migration";
 import loopAuthRoutes           from "./routes/loop-auth";
 import countryRoutes            from "./routes/country";
 import expansionRoutes          from "./routes/expansion";
+import smartLoginRoute           from "./routes/smart-login";
+import adminUsernameRoutes       from "./routes/admin-username";
 
 export type Bindings = {
   SUPABASE_URL:              string;
@@ -254,6 +256,8 @@ app.route("/auth/login-username",    loginUsernameRoute);
 app.route("/recovery",               recoveryRoutes);
 app.route("/auth/qr",                qrRoutes);
 app.route("/auth/webauthn",          webauthnRoutes);
+app.route("/auth/smart-login",        smartLoginRoute);
+app.route("/admin/usernames",         adminUsernameRoutes);
 app.route("/admin/metrics",          metricsRoutes);
 app.route("/admin/expansion",        expansionRoutes);
 app.route("/migration",              migrationRoutes);
