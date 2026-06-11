@@ -25,6 +25,8 @@ import {
   rateLimitResponse,
 } from "../lib/rate-limit";
 import { writeAuditLog } from "../lib/audit";
+import { isSessionActive, isUserSuspended } from "../lib/session";
+import type { KvSessionStore } from "../lib/session";
 
 const auth = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -699,8 +701,7 @@ auth.post("/refresh", async (c) => {
     .select("id,email,name,role,username,account_status")
     .eq("id", userId)
     .limit(1);
-  type UserWithStatus = { id: string; email: string; name: string | null; role: string; username?: string | null; account_status?: string | null };
-  const user = users?.[0] as UserWithStatus | undefined;
+  const user = users?.[0] as { id: string; email: string; name: string | null; role: string; username?: string | null; account_status?: string | null } | undefined;
   if (!user) return c.json({ refreshed: false, reason: "user_not_found" }, 401);
 
   if (user.account_status === "suspended" || user.account_status === "banned") {
@@ -711,15 +712,13 @@ auth.post("/refresh", async (c) => {
   const kvStore = (c.env as unknown as Record<string, unknown>).RALD_SESSION_KV;
   if (kvStore) {
     try {
-      const { isSessionActive, isUserSuspended } = await import("../lib/session");
-      type KvStore = Parameters<typeof isUserSuspended>[0];
-      const isSuspended = await isUserSuspended(kvStore as KvStore, userId);
+      const isSuspended = await isUserSuspended(kvStore as KvSessionStore, userId);
       if (isSuspended) return c.json({ refreshed: false, reason: "account_suspended" }, 403);
 
       const sessionId = typeof decoded.session_id === "string" ? decoded.session_id
         : typeof decoded.sid === "string" ? decoded.sid : null;
       if (sessionId) {
-        const { active, reason: sessionReason } = await isSessionActive(kvStore as KvStore, sessionId);
+        const { active, reason: sessionReason } = await isSessionActive(kvStore as KvSessionStore, sessionId);
         if (!active) return c.json({ refreshed: false, reason: sessionReason ?? "session_revoked" }, 401);
       }
     } catch {
