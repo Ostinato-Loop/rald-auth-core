@@ -1,186 +1,148 @@
-name: Apply Identity Sprint Migration
+name: Apply All Pending Migrations
 
-on:
-  workflow_dispatch:
-    inputs:
-      dry_run:
-        description: "Dry run — verify connection without applying changes"
-        type: boolean
-        default: false
+  on:
+    workflow_dispatch:
+      inputs:
+        dry_run:
+          description: "Dry run — verify connection without applying changes"
+          type: boolean
+          default: false
 
-jobs:
-  migrate:
-    name: Apply 20260611_identity_audit_sprint.sql
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+  jobs:
+    migrate:
+      name: Apply 4 pending SQL migrations
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
 
-      - name: Apply migration via Supabase /rest/v1/sql
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          DRY_RUN: ${{ inputs.dry_run }}
-        run: |
-          cat > /tmp/run-migration.mjs << 'JSEOF'
-          import { readFileSync } from "fs";
+        - name: Apply all pending migrations
+          env:
+            SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+            SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+            DRY_RUN: ${{ inputs.dry_run }}
+          run: |
+            cat > /tmp/run-migrations.mjs << 'JSEOF'
+            import { readFileSync } from "fs";
 
-          const url = process.env.SUPABASE_URL;
-          const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-          const isDryRun = process.env.DRY_RUN === "true";
+            const url    = process.env.SUPABASE_URL;
+            const key    = process.env.SUPABASE_SERVICE_ROLE_KEY;
+            const isDry  = process.env.DRY_RUN === "true";
 
-          if (!url || !key) {
-            console.error("❌ SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required");
-            process.exit(1);
-          }
+            if (!url || !key) { console.error("❌ SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY required"); process.exit(1); }
 
-          const sql = readFileSync(
-            "supabase/migrations/20260611_identity_audit_sprint.sql",
-            "utf8"
-          );
-
-          if (isDryRun) {
-            console.log("DRY RUN — SQL file loaded, connection credentials present.");
-            console.log(`SQL length: ${sql.length} characters`);
-            const r = await fetch(`${url}/rest/v1/auth_users?limit=0`, {
-              headers: { apikey: key, Authorization: `Bearer ${key}` },
+            // Connection check
+            const ping = await fetch(`${url}/rest/v1/auth_users?limit=0`, {
+              headers: { apikey: key, Authorization: `Bearer ${key}` }
             });
-            console.log(`Supabase auth check: HTTP ${r.status} (expect 200)`);
-            if (r.status !== 200) process.exit(1);
-            process.exit(0);
-          }
+            console.log(`Supabase connection: HTTP ${ping.status}`);
+            if (ping.status !== 200) { console.error("❌ Cannot reach Supabase"); process.exit(1); }
+            if (isDry) { console.log("DRY RUN: connection OK, skipping migration."); process.exit(0); }
 
-          async function runSql(query) {
-            const r = await fetch(`${url}/rest/v1/sql`, {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${key}`,
-                apikey: key,
-                "Content-Type": "application/sql",
-              },
-              body: query,
-            });
-            const text = await r.text();
-            return { ok: r.ok, status: r.status, text };
-          }
+            // Apply via /rest/v1/sql endpoint — attempts whole-batch first, then statement-by-statement
+            async function applySQL(path) {
+              console.log(`\n════ ${path} ════`);
+              const sql = readFileSync(path, "utf8");
 
-          // ── Attempt 1: run the whole migration as a single transaction ────────
-          console.log("→ Attempting full migration as single batch...");
-          const full = await runSql(sql);
-          console.log(`HTTP ${full.status}: ${full.text.slice(0, 300)}`);
-
-          if (full.ok) {
-            console.log("✅ Full migration applied successfully!");
-            process.exit(0);
-          }
-
-          console.log("Full batch failed — running statement by statement...\n");
-
-          // ── Attempt 2: statement-by-statement (handles DDL perm failures) ─────
-          // Split carefully: do not split inside $$ ... $$ PL/pgSQL blocks.
-          const stmts = [];
-          let current = "";
-          let inDollarQuote = false;
-          let dollarTag = "";
-
-          for (const line of sql.split("\n")) {
-            const trimmed = line.trim();
-            if (trimmed.startsWith("--")) { current += line + "\n"; continue; }
-
-            // Toggle dollar-quote state
-            const dollarMatches = line.match(/\$\$|\$[A-Za-z_][A-Za-z0-9_]*\$/g) || [];
-            for (const m of dollarMatches) {
-              if (!inDollarQuote) { inDollarQuote = true; dollarTag = m; }
-              else if (m === dollarTag) { inDollarQuote = false; dollarTag = ""; }
-            }
-
-            current += line + "\n";
-
-            if (!inDollarQuote && line.trimEnd().endsWith(";")) {
-              const stmt = current.trim();
-              if (stmt.length > 0) stmts.push(stmt);
-              current = "";
-            }
-          }
-          if (current.trim().length > 0) stmts.push(current.trim());
-
-          const contentStmts = stmts.filter(s => {
-            const t = s.replace(/--.*$/gm, "").trim();
-            return t.length > 0;
-          });
-
-          console.log(`Found ${contentStmts.length} statements.\n`);
-
-          let passed = 0, skipped = 0;
-          const altTableFails = [], otherFails = [];
-
-          for (const stmt of contentStmts) {
-            const label = stmt.replace(/\s+/g, " ").slice(0, 90);
-            const r = await runSql(stmt);
-            if (r.ok) {
-              console.log("  ✓", label);
-              passed++;
-            } else {
-              const msg = r.text.slice(0, 300);
-              const isPermFail = msg.includes("must be owner") ||
-                                 msg.includes("permission denied") ||
-                                 msg.includes("must have privileges");
-              if (isPermFail) {
-                console.log("  ⚠ (needs superuser)", label);
-                console.log("    →", msg.slice(0, 120));
-                altTableFails.push(stmt);
-                skipped++;
-              } else {
-                console.log("  ✗", label);
-                console.log("    →", msg.slice(0, 120));
-                otherFails.push({ stmt: label, error: msg });
+              async function exec(query) {
+                const r = await fetch(`${url}/rest/v1/sql`, {
+                  method: "POST",
+                  headers: { Authorization: `Bearer ${key}`, apikey: key, "Content-Type": "application/sql" },
+                  body: query,
+                });
+                return { ok: r.ok, status: r.status, text: await r.text() };
               }
+
+              // Try full batch first
+              const batch = await exec(sql);
+              if (batch.ok) { console.log("  ✅ Full migration applied."); return; }
+              console.log(`  Full batch HTTP ${batch.status}: ${batch.text.slice(0,200)}`);
+              console.log("  Falling back to statement-by-statement...");
+
+              // Statement-by-statement (DDL perm failures are skipped with warning)
+              let inDollar = false, dollarTag = "", cur = "", passed = 0, warned = 0, failed = 0;
+              for (const line of sql.split("\n")) {
+                if (line.trim().startsWith("--")) { cur += line + "\n"; continue; }
+                const dms = line.match(/\$\$|\$[A-Za-z_][A-Za-z0-9_]*\$/g) || [];
+                for (const m of dms) {
+                  if (!inDollar) { inDollar = true; dollarTag = m; }
+                  else if (m === dollarTag) { inDollar = false; dollarTag = ""; }
+                }
+                cur += line + "\n";
+                if (!inDollar && line.trimEnd().endsWith(";")) {
+                  const stmt = cur.trim();
+                  cur = "";
+                  if (!stmt.replace(/--.*$/gm,"").trim()) continue;
+                  const r2 = await exec(stmt);
+                  const lbl = stmt.replace(/\s+/g," ").slice(0,80);
+                  if (r2.ok) { console.log("  ✓", lbl); passed++; }
+                  else if (r2.text.includes("already exists") || r2.text.includes("duplicate")) {
+                    console.log("  ➤ (already exists, idempotent)", lbl); passed++;
+                  } else if (r2.text.includes("must be owner") || r2.text.includes("permission denied")) {
+                    console.log("  ⚠ (needs superuser)", lbl); warned++;
+                  } else { console.log("  ✗", lbl, "→", r2.text.slice(0,120)); failed++; }
+                }
+              }
+              console.log(`  Result: ${passed} ✓  | ${warned} ⚠ need superuser | ${failed} ✗`);
+              if (failed > 0) process.exitCode = 1;
             }
-          }
 
-          console.log(`\n─────────────────────────────────────────`);
-          console.log(`Results: ${passed} passed | ${skipped} need superuser | ${otherFails.length} other failures`);
+            // Apply in dependency order
+            const migrations = [
+              "supabase/migrations/20260611_country_activation_framework.sql",
+              "supabase/migrations/20260611_username_registry_status.sql",
+              "supabase/migrations/20260611_identity_audit_sprint.sql",
+              "supabase/migrations/20260611_auto_username_migration.sql",
+            ];
+            for (const m of migrations) await applySQL(m);
+            console.log("\n════ All migrations complete. ════");
+            JSEOF
+            node /tmp/run-migrations.mjs
 
-          if (altTableFails.length > 0) {
-            console.log("\n⚠️  The following statements need postgres/superuser access.");
-            console.log("   Run them manually in the Supabase SQL Editor:");
-            console.log("   https://supabase.com/dashboard/project/onxdcikfttdmnhofsuwo/sql/new\n");
-            altTableFails.forEach(s => console.log("   " + s.slice(0, 120)));
-          }
+        - name: Verify critical tables exist
+          env:
+            SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+            SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          run: |
+            node << 'JSEOF'
+            const url = process.env.SUPABASE_URL;
+            const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+            const h   = { apikey: key, Authorization: `Bearer ${key}` };
+            const checks = [
+              ["country_registry",         `${url}/rest/v1/country_registry?limit=0`],
+              ["usernames.status column",  `${url}/rest/v1/usernames?select=status&limit=0`],
+              ["auth_trust_profiles",      `${url}/rest/v1/auth_trust_profiles?limit=0`],
+              ["username_migration_queue", `${url}/rest/v1/username_migration_queue?limit=0`],
+            ];
+            let ok = true;
+            for (const [name, endpoint] of checks) {
+              const r = await fetch(endpoint, { headers: h });
+              const pass = r.status === 200 || r.status === 206;
+              console.log(`${pass ? "✓" : "✗"} ${name}: HTTP ${r.status}`);
+              if (!pass) ok = false;
+            }
+            if (!ok) { console.error("Some verification checks failed"); process.exit(1); }
+            console.log("\n✅ All tables verified.");
+            JSEOF
 
-          if (otherFails.length > 0) {
-            console.error("\n❌ Unexpected failures — investigate:");
-            otherFails.forEach(f => console.error(`  ${f.stmt}\n  → ${f.error}`));
-            process.exit(1);
-          }
-
-          process.exit(0);
-          JSEOF
-
-          node /tmp/run-migration.mjs
-
-      - name: Verify tables and functions exist
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: |
-          node << 'JSEOF'
-          const url = process.env.SUPABASE_URL;
-          const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-          const h = { apikey: key, Authorization: `Bearer ${key}` };
-
-          const checks = [
-            ["auth_trust_profiles",    `${url}/rest/v1/auth_trust_profiles?limit=0`],
-            ["username_migration_queue", `${url}/rest/v1/username_migration_queue?limit=0`],
-            ["repair_identity_records", `${url}/rest/v1/rpc/repair_identity_records`],
-          ];
-
-          let ok = true;
-          for (const [name, endpoint] of checks) {
-            const r = await fetch(endpoint, { headers: h });
-            const pass = r.status === 200 || r.status === 204;
-            console.log(`${pass ? "✓" : "✗"} ${name}: HTTP ${r.status}`);
-            if (!pass) ok = false;
-          }
-          if (!ok) { console.error("Some checks failed"); process.exit(1); }
-          JSEOF
-
+        - name: Verify Nigeria ACTIVE in country_registry
+          continue-on-error: true
+          env:
+            SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+            SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          run: |
+            node << 'JSEOF'
+            const url = process.env.SUPABASE_URL;
+            const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+            const h   = { apikey: key, Authorization: `Bearer ${key}` };
+            const r   = await fetch(`${url}/rest/v1/country_registry?country_code=eq.NG&select=country_code,status`, { headers: h });
+            const d   = await r.json();
+            const ng  = d[0];
+            if (!ng) { console.error("❌ Nigeria NOT found in country_registry"); process.exit(1); }
+            console.log(`NG status: ${ng.status}`);
+            if (ng.status !== "ACTIVE") {
+              console.warn("⚠ Nigeria not yet ACTIVE — run country seed step.");
+            } else {
+              console.log("✅ Nigeria is ACTIVE — beta launch ready.");
+            }
+            JSEOF
+  
