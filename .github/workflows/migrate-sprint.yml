@@ -1,24 +1,25 @@
 name: Apply All Pending Migrations
-  on:
-    workflow_dispatch:
-      inputs:
-        dry_run:
-          description: "Dry run (verify connection, skip changes)"
-          type: boolean
-          default: false
-  jobs:
-    migrate:
-      name: Apply all pending SQL migrations
-      runs-on: ubuntu-latest
-      steps:
-        - uses: actions/checkout@v4
-        - uses: actions/setup-node@v4
-          with:
-            node-version: 22
-        - name: Run migration script
-          env:
-            SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-            SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-            DRY_RUN: ${{ inputs.dry_run }}
-          run: node scripts/run-migrations.mjs
-  
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (verify connection, skip changes)"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+jobs:
+  migrate:
+    name: Apply all pending SQL migrations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run migration script
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: node scripts/run-migrations.mjs
