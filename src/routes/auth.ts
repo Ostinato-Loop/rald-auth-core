@@ -163,8 +163,34 @@ auth.post("/register", async (c) => {
   }
 
   const newUser = newUsers[0]!;
+
+  // Phase 1 fix: generate temp username (user_xxxxx) for legacy email/password registrations
+  // Users who signed up without the V2 username-first flow must still have a username
+  const tempUsername = await (async () => {
+    const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const buf = new Uint8Array(5);
+      crypto.getRandomValues(buf);
+      const suffix = Array.from(buf, b => chars[b % chars.length]).join("");
+      const candidate = `user_${suffix}`;
+      const { data: existing } = await db
+        .from("usernames").select("username").eq("username", candidate).limit(1);
+      if (!existing?.length) return candidate;
+    }
+    return `user_${Date.now().toString(36)}`; // fallback: epoch-based
+  })();
+
+  // Set username on the auth_users row and register in usernames table (non-blocking)
+  db.from("auth_users")
+    .update({ username: tempUsername, username_set_at: new Date().toISOString() })
+    .eq("id", newUser.id)
+    .then(() => {}, () => {});
+  db.from("usernames")
+    .insert({ username: tempUsername, user_id: newUser.id, claimed_at: new Date().toISOString(), active: true })
+    .then(() => {}, () => {});
+
   const token = await signJwt(
-    { id: newUser.id, email: newUser.email, role: newUser.role, iss: "rald.cloud" },
+    { id: newUser.id, email: newUser.email, role: newUser.role, username: tempUsername, iss: "rald.cloud" },
     c.env.RALD_JWT_SECRET
   );
 
@@ -177,10 +203,10 @@ auth.post("/register", async (c) => {
   if (c.env.RESEND_API_KEY)
     sendWelcomeEmail(newUser.email, newUser.name ?? name, c.env.RESEND_API_KEY).catch(console.error);
 
-  await writeAuditLog(db, { userId: newUser.id, action: "register", ip, status: "success", metadata: { email, role } });
+  await writeAuditLog(db, { userId: newUser.id, action: "register", ip, status: "success", metadata: { email, role, temp_username: tempUsername } });
   c.header("Set-Cookie", buildSessionCookie(token));
 
-  return c.json({ token, user: userShape(newUser) }, 201);
+  return c.json({ token, user: { ...userShape(newUser), username: tempUsername } }, 201);
 });
 
 // ── SMS OTP Auth ──────────────────────────────────────────────────────────────
