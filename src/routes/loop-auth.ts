@@ -129,8 +129,9 @@ loopAuth.post("/loop-claim", async (c) => {
     .select("id")
     .limit(1);
 
-  if (loopInsertResult.error?.code === "42703" || loopInsertResult.error?.message?.includes("does not exist")) {
-    console.warn("[loop-claim] V2 schema pending — retrying with base columns (apply migration to fix)");
+  // If V2 insert fails for any reason except duplicate key, retry with base schema
+  if (loopInsertResult.error && loopInsertResult.error.code !== "23505") {
+    console.warn("[loop-claim] V2 insert failed (code=" + loopInsertResult.error.code + ", msg=" + loopInsertResult.error.message + ") — retrying with base schema");
     loopInsertResult = await db
       .from("auth_users")
       .insert({
@@ -150,8 +151,8 @@ loopAuth.post("/loop-claim", async (c) => {
     if (createErr?.code === "23505") {
       return c.json({ error: "Username is already taken", available: false }, 409);
     }
-    console.error("[loop-claim] user create error:", createErr?.message);
-    return c.json({ error: "Failed to create identity" }, 500);
+    console.error("[loop-claim] user create error code=" + createErr?.code + " msg=" + createErr?.message);
+    return c.json({ error: "Failed to create identity", _dbg: createErr?.code + ": " + createErr?.message?.slice(0, 120) }, 500);
   }
 
   const userId = newUsers[0]!.id as string;
