@@ -348,11 +348,17 @@ smartLogin.post("/complete", async (c) => {
       return c.json({ error: "pinId and pin are required for SMS verification" }, 400);
     }
     const termiiKey = c.env.TERMII_API_KEY;
+    const isProduction = c.env.ENVIRONMENT === "production";
     let verified = false;
     try {
+      // SEC-OTP-003: guard dev-mode bypass behind !isProduction.
+      // If TERMII_API_KEY is absent in production (misconfigured secret),
+      // the ternary would fall through to body.pin === "123456" — granting
+      // any user a session with a hardcoded pin. Fix: only allow the fallback
+      // in non-production environments where TERMII_API_KEY is absent.
       verified = termiiKey
         ? await verifySmsOtp(body.pinId, body.pin, termiiKey)
-        : body.pin === "123456";
+        : !isProduction && body.pin === "123456";
     } catch (err) {
       console.error("[smart-login/complete] Termii error:", String(err));
     }
