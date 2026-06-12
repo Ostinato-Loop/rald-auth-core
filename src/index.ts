@@ -43,6 +43,9 @@ import smartLoginRoute           from "./routes/smart-login";
 import adminUsernameRoutes       from "./routes/admin-username";
 import identityRoutes            from "./routes/identity";
 import developerRoutes          from "./routes/developer";
+import machineRoutes            from "./routes/machine";
+import trustRoutes              from "./routes/trust";
+import permissionsRoutes        from "./routes/permissions";
 
 export type Bindings = {
   SUPABASE_URL:              string;
@@ -269,6 +272,9 @@ app.route("/migration",              migrationRoutes);
 app.route("/country",                countryRoutes);
 app.route("/identity",               identityRoutes);
 app.route("/developer",              developerRoutes);
+app.route("/machine",              machineRoutes);
+app.route("/trust",                trustRoutes);
+app.route("/permissions",          permissionsRoutes);
 app.route("/",                       sessionRoutes);
 
 // ── Root ──────────────────────────────────────────────────────────────────────
