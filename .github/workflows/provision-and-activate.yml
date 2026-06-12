@@ -1,0 +1,268 @@
+name: Provision Machine Identities + Activate Crons
+
+# Generates cryptographic machine identity secrets for all 8 RALD services,
+# upserts them into Supabase (matching on service_name), pushes MACHINE_KEY_ID
+# + MACHINE_KEY_SECRET to each Cloudflare Worker via wrangler, and activates
+# scheduled cron triggers for rald-auth and rald-notify via the CF API.
+#
+# Algorithm mirrors machine.ts exactly:
+#   secret  = 32 random bytes → hex (64 chars)
+#   salt    = 16 random bytes → hex (32 chars)
+#   key_hash = SHA-256(secret + ":" + salt) → hex
+#   MACHINE_KEY_SECRET delivered to worker = "key_id:secret"
+#
+# Required GitHub secrets (org-level):
+#   CLOUDFLARE_API_TOKEN    — Workers:Edit + Scheduled Tasks:Edit
+#   CLOUDFLARE_ACCOUNT_ID
+#   SUPABASE_URL            (or uses hardcoded fallback)
+#   SUPABASE_SERVICE_ROLE_KEY
+#
+# Trigger: manual only (workflow_dispatch) or via GitHub API dispatch.
+# Sprint: Public Beta Hardening · C-CERT-001 · 2026-06-15
+# LILCKY STUDIO LIMITED
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run — generate secrets but skip Supabase + wrangler writes"
+        type: boolean
+        default: false
+
+concurrency:
+  group: provision-machine-identities
+  cancel-in-progress: false
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 1: Generate secrets, upsert to Supabase, push to CF Workers
+  # ─────────────────────────────────────────────────────────────────────────────
+  provision-machine-identities:
+    name: Provision machine identity secrets (8 services)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL || 'https://onxdcikfttdmnhofsuwo.supabase.co' }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install wrangler
+        run: npm install wrangler --no-save --prefer-offline 2>/dev/null || npm install wrangler --no-save
+
+      - name: Generate + provision machine identity secrets
+        id: provision
+        run: |
+          node << 'JSEOF'
+          const { createHash, randomBytes } = require('crypto');
+          const { execSync } = require('child_process');
+
+          const DRY_RUN = process.env.DRY_RUN === 'true';
+          const SUPABASE_URL = process.env.SUPABASE_URL;
+          const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+          // Service map: key_id matches seed migration 20260615000000_machine_identity_seed.sql
+          const services = [
+            { keyId: 'mid_loop_api_prod_001',   serviceName: 'loop',           workerName: 'loop-api',           scopes: ['messages:read','messages:write','auth:verify','notifications:send'] },
+            { keyId: 'mid_messenger_prod_001',  serviceName: 'messenger',      workerName: 'loop-messenger-api', scopes: ['messages:read','messages:write','auth:verify','notifications:send'] },
+            { keyId: 'mid_event_bus_prod_001',  serviceName: 'rald-event-bus', workerName: 'rald-event-bus',     scopes: ['events:publish','events:subscribe','auth:verify'] },
+            { keyId: 'mid_config_prod_001',     serviceName: 'rald-config',    workerName: 'rald-config',        scopes: ['config:read','config:write','auth:verify'] },
+            { keyId: 'mid_search_prod_001',     serviceName: 'rald-search',    workerName: 'rald-search',        scopes: ['search:index','search:query','auth:verify'] },
+            { keyId: 'mid_notify_prod_001',     serviceName: 'rald-notify',    workerName: 'rald-notify',        scopes: ['notifications:send','notifications:read','auth:verify'] },
+            { keyId: 'mid_realtime_prod_001',   serviceName: 'rald-realtime',  workerName: 'rald-realtime',      scopes: ['realtime:broadcast','auth:verify'] },
+            { keyId: 'mid_auth_prod_001',       serviceName: 'rald-auth-core', workerName: 'rald-auth',          scopes: ['auth:admin','machine:provision','auth:verify'] },
+          ];
+
+          // Mirror machine.ts algorithm exactly
+          function generateSecret() {
+            const secret  = randomBytes(32).toString('hex'); // 64 hex chars
+            const salt    = randomBytes(16).toString('hex'); // 32 hex chars
+            const keyHash = createHash('sha256').update(`${secret}:${salt}`).digest('hex');
+            return { secret, salt, keyHash };
+          }
+
+          async function upsertToSupabase(svc, secret, salt, keyHash) {
+            if (!SUPABASE_KEY) throw new Error('SUPABASE_SERVICE_ROLE_KEY not set');
+            const rotationDue = new Date(Date.now() + 86400 * 90 * 1000).toISOString();
+            const body = JSON.stringify({
+              key_id:          svc.keyId,
+              key_hash:        keyHash,
+              key_salt:        salt,
+              status:          'active',
+              last_rotated_at: new Date().toISOString(),
+              rotation_due_at: rotationDue,
+              scopes:          svc.scopes,
+            });
+            const res = await fetch(`${SUPABASE_URL}/rest/v1/machine_identities?on_conflict=service_name`, {
+              method:  'POST',
+              headers: {
+                'apikey':        SUPABASE_KEY,
+                'Authorization': `Bearer ${SUPABASE_KEY}`,
+                'Content-Type':  'application/json',
+                'Prefer':        'resolution=merge-duplicates,return=minimal',
+              },
+              body: `[${body}]`,
+            });
+            if (!res.ok) {
+              const txt = await res.text();
+              throw new Error(`Supabase upsert failed (${res.status}): ${txt}`);
+            }
+          }
+
+          function pushToWorker(workerName, keyId, secretFull) {
+            execSync(
+              `printf '%s' '${keyId}' | npx wrangler secret put MACHINE_KEY_ID --name '${workerName}'`,
+              { stdio: 'inherit', env: { ...process.env } }
+            );
+            execSync(
+              `printf '%s' '${secretFull}' | npx wrangler secret put MACHINE_KEY_SECRET --name '${workerName}'`,
+              { stdio: 'inherit', env: { ...process.env } }
+            );
+          }
+
+          (async () => {
+            console.log(`\n${'='.repeat(66)}`);
+            console.log(`  RALD Machine Identity Provisioning — ${new Date().toISOString()}`);
+            console.log(`  DRY_RUN=${DRY_RUN}`);
+            console.log('='.repeat(66) + '\n');
+
+            let successCount = 0;
+            let failCount    = 0;
+
+            for (const svc of services) {
+              console.log(`\n── ${svc.serviceName} (${svc.keyId}) ──`);
+              const { secret, salt, keyHash } = generateSecret();
+              const machineSecret = `${svc.keyId}:${secret}`;
+
+              if (DRY_RUN) {
+                console.log(`  [DRY RUN] Generated: key_id=${svc.keyId} hash=${keyHash.slice(0,16)}...`);
+                successCount++;
+                continue;
+              }
+
+              // 1. Upsert to Supabase
+              try {
+                await upsertToSupabase(svc, secret, salt, keyHash);
+                console.log(`  ✅ Supabase: ${svc.serviceName} upserted`);
+              } catch (err) {
+                console.error(`  ❌ Supabase FAILED for ${svc.serviceName}: ${err.message}`);
+                failCount++;
+                continue;
+              }
+
+              // 2. Push to CF Worker
+              try {
+                pushToWorker(svc.workerName, svc.keyId, machineSecret);
+                console.log(`  ✅ Wrangler: MACHINE_KEY_ID + MACHINE_KEY_SECRET pushed to '${svc.workerName}'`);
+                successCount++;
+              } catch (err) {
+                console.error(`  ❌ Wrangler FAILED for ${svc.workerName}: ${err.message}`);
+                failCount++;
+              }
+
+              // Brief pause to avoid CF rate limits
+              await new Promise(r => setTimeout(r, 400));
+            }
+
+            console.log('\n' + '='.repeat(66));
+            console.log(`  RESULT: ${successCount}/8 services provisioned, ${failCount} failed`);
+            console.log(`  Rotation due: ${new Date(Date.now() + 86400 * 90 * 1000).toISOString().slice(0,10)} (90 days)`);
+            console.log('='.repeat(66) + '\n');
+
+            if (failCount > 0) {
+              console.error(`WARN: ${failCount} service(s) failed. Review errors above.`);
+              process.exit(1);
+            }
+          })();
+          JSEOF
+
+      - name: Audit record
+        if: always()
+        run: echo "AUDIT: job=provision-machine-identities dry_run=${{ inputs.dry_run }} actor=${{ github.actor }} sha=${{ github.sha }} ts=$(date -u +%Y-%m-%dT%H:%M:%SZ) result=${{ steps.provision.outcome }}"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 2: Activate scheduled cron triggers via Cloudflare API
+  # ─────────────────────────────────────────────────────────────────────────────
+  activate-crons:
+    name: Activate CF cron triggers (rald-auth + rald-notify)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      DRY_RUN: ${{ inputs.dry_run || 'false' }}
+
+    steps:
+      - name: Activate cron schedules via CF API
+        run: |
+          node << 'JSEOF'
+          const DRY_RUN = process.env.DRY_RUN === 'true';
+          const TOKEN   = process.env.CLOUDFLARE_API_TOKEN;
+          const ACCOUNT = process.env.CLOUDFLARE_ACCOUNT_ID;
+
+          if (!TOKEN || !ACCOUNT) {
+            console.error('CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID are required');
+            process.exit(1);
+          }
+
+          const workers = [
+            {
+              name:  'rald-auth',
+              crons: ['0 * * * *', '0 0 * * *'],
+              note:  'hourly OTP+session cleanup / midnight device cleanup + rotation alerts',
+            },
+            {
+              name:  'rald-notify',
+              crons: ['*/5 * * * *'],
+              note:  'every 5 min notification dispatch',
+            },
+          ];
+
+          async function putSchedules(workerName, crons) {
+            const url  = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/workers/scripts/${workerName}/schedules`;
+            const body = JSON.stringify(crons.map(cron => ({ cron })));
+            const res  = await fetch(url, {
+              method:  'PUT',
+              headers: { 'Authorization': `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+              body,
+            });
+            const data = await res.json();
+            if (!data.success) throw new Error(JSON.stringify(data.errors ?? data));
+            return data.result;
+          }
+
+          (async () => {
+            console.log(`\n${'='.repeat(66)}`);
+            console.log(`  RALD Cron Activation — ${new Date().toISOString()}`);
+            console.log(`  DRY_RUN=${DRY_RUN}`);
+            console.log('='.repeat(66) + '\n');
+
+            for (const w of workers) {
+              console.log(`── ${w.name}: ${w.crons.join(', ')} (${w.note})`);
+              if (DRY_RUN) { console.log('  [DRY RUN] skipped'); continue; }
+              try {
+                const result = await putSchedules(w.name, w.crons);
+                console.log(`  ✅ Activated: ${JSON.stringify(result)}`);
+              } catch (err) {
+                console.error(`  ❌ FAILED (${w.name}): ${err.message}`);
+                // Continue — partial success still valuable
+              }
+            }
+
+            console.log('\n' + '='.repeat(66));
+            console.log('  Cron activation complete.');
+            console.log('='.repeat(66) + '\n');
+          })();
+          JSEOF
+
+      - name: Audit record
+        if: always()
+        run: echo "AUDIT: job=activate-crons dry_run=${{ inputs.dry_run }} actor=${{ github.actor }} sha=${{ github.sha }} ts=$(date -u +%Y-%m-%dT%H:%M:%SZ) result=${{ job.status }}"
