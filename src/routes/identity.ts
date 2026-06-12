@@ -6,12 +6,15 @@
  * step so they never ask for information RALD already has.
  *
  * Routes
- *   GET  /identity/intelligence      → full capability snapshot
- *   POST /identity/intelligence      → update a single capability field
- *   GET  /identity/memory            → onboarding + dismissal history
- *   POST /identity/memory/dismiss    → mark a prompt as dismissed
- *   POST /identity/memory/step       → record current onboarding step
+ *   GET  /identity/canonical-redirect   → tells products where to send users for identity edits
+ *   GET  /identity/capabilities         → user's unlocked product capabilities
+ *   GET  /identity/intelligence         → full capability snapshot (auth required)
+ *   POST /identity/intelligence         → update a single capability field (auth required)
+ *   GET  /identity/memory               → onboarding + dismissal history (auth required)
+ *   POST /identity/memory/dismiss       → mark a prompt as dismissed (auth required)
+ *   POST /identity/memory/step          → record current onboarding step (auth required)
  *
+ * ONE RALD — Identity Consolidation & Account Authority Program
  * LILCKY STUDIO LIMITED · 2026-06-12
  */
 
@@ -20,6 +23,128 @@ import type { Bindings, Variables } from "../index";
 import { authMiddleware } from "../lib/middleware";
 
 const identity = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+
+// ── GET /identity/canonical-redirect ─────────────────────────────────────────
+//
+// Products use this whenever the user attempts any identity-related action:
+//   Edit Profile · Change Username · Security Settings · Session Management
+//   Device Management · Verification · Recovery · Developer Portal
+//
+// Response is intentionally unauthenticated so products can call it pre-login.
+// The canonical URL is always profiles.rald.cloud — the ONE RALD Account Portal.
+//
+// Action IDs that products should pass as ?action=<id>:
+//   profile          → /account
+//   username         → /account
+//   security         → /security
+//   sessions         → /security
+//   devices          → /security
+//   verification     → /account
+//   recovery         → /login
+//   developer        → /developer  (future)
+//   privacy          → /privacy
+//   country          → /account
+//   workspace        → /account
+//   delete           → /privacy
+
+const CANONICAL_BASE = "https://profiles.rald.cloud";
+
+const ACTION_PATHS: Record<string, string> = {
+  profile:       "/account",
+  username:      "/account",
+  security:      "/security",
+  sessions:      "/security",
+  devices:       "/security",
+  verification:  "/account",
+  recovery:      "/login",
+  developer:     "/developer",
+  privacy:       "/privacy",
+  country:       "/account",
+  workspace:     "/account",
+  delete:        "/privacy",
+};
+
+identity.get("/canonical-redirect", async (c) => {
+  const action  = c.req.query("action")  ?? null;
+  const appId   = c.req.query("app_id")  ?? null;
+  const returnTo = c.req.query("return_to") ?? null;
+
+  const path   = (action && ACTION_PATHS[action]) ?? "/account";
+  let canonical = `${CANONICAL_BASE}${path}`;
+
+  // Preserve the calling product's context so the portal can redirect back after edit
+  const params = new URLSearchParams();
+  if (appId)    params.set("app_id",    appId);
+  if (returnTo) params.set("return_to", returnTo);
+  if (action)   params.set("intent",    action);
+  const qs = params.toString();
+  if (qs) canonical += `?${qs}`;
+
+  return c.json({
+    canonical,
+    base:   CANONICAL_BASE,
+    path,
+    reason: "identity-management",
+    // Human-readable note for product developers
+    note: "Users must edit their identity only at profiles.rald.cloud. Products are consumers of RALD Identity, not owners.",
+  });
+});
+
+// ── GET /identity/capabilities ────────────────────────────────────────────────
+//
+// Returns the authenticated user's unlocked product capabilities.
+// Products self-configure based on this instead of guessing or hard-coding.
+// Capabilities are derived from trust level, verification status, and provisioned apps.
+
+identity.get("/capabilities", authMiddleware, async (c) => {
+  const user = c.get("user")!;
+  const db   = c.get("db");
+
+  const [capRes, userRes] = await Promise.all([
+    db.from("identity_capabilities")
+      .select("*")
+      .eq("user_id", user.id)
+      .maybeSingle(),
+    db.from("auth_users")
+      .select("trust_level, username, reserved_email_address")
+      .eq("id", user.id)
+      .limit(1),
+  ]);
+
+  const cap = capRes.data;
+  const u   = userRes.data?.[0];
+
+  const trustLevel: string = cap?.trust_level ?? u?.trust_level ?? "none";
+  const hasUsername         = !!(cap?.username ?? u?.username);
+  const hasMail             = !!(cap?.mail_reserved ?? u?.reserved_email_address);
+  const creatorVerified     = cap?.creator_verified  ?? false;
+  const businessVerified    = cap?.business_verified ?? false;
+
+  return c.json({
+    // Core identity capabilities — available to all registered users
+    mail:          hasMail,
+    developer:     hasUsername,
+    workspace:     hasUsername,
+
+    // Trust-gated capabilities
+    payments:      ["basic", "full", "elite"].includes(trustLevel),
+    business:      businessVerified || ["full", "elite"].includes(trustLevel),
+    creator:       creatorVerified,
+
+    // Product access
+    loop:          true,
+    messenger:     true,
+    gitrald:       hasUsername,
+    dispatch:      ["full", "elite"].includes(trustLevel),
+    voice:         ["full", "elite"].includes(trustLevel),
+
+    // Trust metadata
+    trust_level:   trustLevel,
+
+    // Identity completeness flag
+    identity_ready: hasUsername && hasMail,
+  });
+});
 
 // ── GET /identity/intelligence ───────────────────────────────────────────────
 identity.get("/intelligence", authMiddleware, async (c) => {
@@ -115,7 +240,7 @@ identity.post("/intelligence", authMiddleware, async (c) => {
   );
 
   if (error) {
-    console.error("[identity] update error:", error.message);
+    c.get("logger")?.error({ err: error.message }, "[identity] update error");
     return c.json({ error: "Update failed" }, 500);
   }
   return c.json({ ok: true, field: body.field });
