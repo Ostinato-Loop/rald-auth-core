@@ -11,6 +11,9 @@ SUPABASE_URL = "https://onxdcikfttdmnhofsuwo.supabase.co"
 # Required (NONE have fallbacks):
 #   SUPABASE_SERVICE_ROLE_KEY  RALD_JWT_SECRET  TERMII_API_KEY
 #   TERMII_SENDER_ID  RESEND_API_KEY  CLERK_SECRET_KEY  CLERK_PUBLISHABLE_KEY
+# Phase 1 additions (optional — enables health alerting and rotation alerts):
+#   OPEN_OBSERVE_API_KEY    OPEN_OBSERVE_ENDPOINT
+#   MACHINE_IDENTITY_SECRET  ADMIN_USER_ID
 
 [[routes]]
 pattern = "auth.rald.cloud/*"
@@ -30,3 +33,12 @@ command = ""
 [observability]
 enabled = true
 head_sampling_rate = 1
+
+# ── Scheduled Jobs (Phase 1 — Self-Healing Ops) ────────────────────────────
+# NOTE: If this wrangler token lacks 'Scheduled Tasks:Edit' scope, add the
+# cron manually via CF Dashboard → Workers & Pages → rald-auth → Triggers.
+[triggers]
+crons = [
+  "0 * * * *",  # Hourly: OTP cleanup + expired session deletion
+  "0 0 * * *"   # Daily: device cleanup + rotation alerts + health snapshot
+]

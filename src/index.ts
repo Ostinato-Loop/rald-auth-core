@@ -1,5 +1,9 @@
 // RALD Auth Core — Cloudflare Worker
-// Deployed at: auth.rald.cloud | Version: 2.8.0
+// Deployed at: auth.rald.cloud | Version: 2.9.0
+// Changelog v2.9.0: Phase 1 — Public Beta Blockers
+//   - /identity-brain/* namespace alias for /identity/* (Rule #4 spec compliance)
+//   - Scheduled cleanup handler: OTP, sessions, devices, rotation alerts, health snapshot
+//   - MACHINE_IDENTITY_SECRET + ADMIN_USER_ID bindings for automated alerting
 // Changelog v2.8.0: Loop Identity Integration
 //   - POST /auth/loop-claim: one-step username claim for Loop — issues JWT immediately
 //     Loop users are now first-class RALD identities from day one (no more guest_xxx@loop.guest)
@@ -47,6 +51,7 @@ import machineRoutes            from "./routes/machine";
 import trustRoutes              from "./routes/trust";
 import permissionsRoutes        from "./routes/permissions";
 import { requestLogger }         from "./lib/logger";
+import { runHourlyCleanup, runDailyCleanup, runHealthSnapshot } from "./jobs/cleanup";
 
 export type Bindings = {
   SUPABASE_URL:              string;
@@ -62,6 +67,8 @@ export type Bindings = {
   RALD_SESSION_KV:           KvSessionStore;
   OPEN_OBSERVE_API_KEY?:     string;  // OpenObserve ingest key (C-CERT-004)
   OPEN_OBSERVE_ENDPOINT?:    string;  // e.g. https://observe.rald.cloud/api/rald/rald-auth-core/_json
+  MACHINE_IDENTITY_SECRET?:  string;  // Phase 1: auth service machine token for calling notify
+  ADMIN_USER_ID?:            string;  // Phase 1: admin user UUID for alerting
 };
 
 export type Variables = {
@@ -69,7 +76,7 @@ export type Variables = {
   user?: JwtPayload;
 };
 
-const VERSION = "2.8.0";
+const VERSION = "2.9.0";
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -172,8 +179,10 @@ app.get("/ready", (c) =>
       clerk:         !!c.env.CLERK_SECRET_KEY && !!c.env.CLERK_PUBLISHABLE_KEY,
       rate_limit_kv: !!(c.env.RATE_LIMIT_KV),
       session_kv:    !!(c.env.RALD_SESSION_KV),
+      observability: !!(c.env.OPEN_OBSERVE_API_KEY && c.env.OPEN_OBSERVE_ENDPOINT),
+      machine_auth:  !!(c.env.MACHINE_IDENTITY_SECRET),
     },
-    phase: "V2.8 — Loop Identity Integration",
+    phase: "V2.9 — Phase 1 Public Beta Blockers",
     ...serviceInfo(c),
   })
 );
@@ -201,6 +210,8 @@ app.get("/system/status", (c) =>
       country_activation: "✓ /country/:code status, /country/waitlist join, /country/:code/access gates",
       expansion_admin:    "✓ /admin/expansion list, transition pipeline, emergency restrict, PayRald gate, scorecard",
       security_headers:   "✓ HSTS, CSP, X-Frame-Options, Referrer-Policy",
+      identity_brain:     "✓ /identity-brain/* — canonical namespace (aliases /identity/*)",
+      scheduled_cleanup:  "✓ OTP, sessions, devices, rotation alerts, health snapshot",
     },
     timestamp: new Date().toISOString(),
   })
@@ -277,17 +288,19 @@ app.route("/admin/expansion",        expansionRoutes);
 app.route("/migration",              migrationRoutes);
 app.route("/country",                countryRoutes);
 app.route("/identity",               identityRoutes);
+app.route("/identity-brain",         identityRoutes);   // Phase 1: canonical Identity Brain namespace (aliases /identity/*)
 app.route("/developer",              developerRoutes);
-app.route("/machine",              machineRoutes);
-app.route("/trust",                trustRoutes);
-app.route("/permissions",          permissionsRoutes);
+app.route("/machine",                machineRoutes);
+app.route("/trust",                  trustRoutes);
+app.route("/permissions",            permissionsRoutes);
 app.route("/",                       sessionRoutes);
 
 // ── Root ──────────────────────────────────────────────────────────────────────
 app.get("/", (c) => c.json({
-  docs:  "https://learn.rald.cloud/developers",
-  auth:  "https://auth.rald.cloud/health",
-  learn: "https://learn.rald.cloud",
+  docs:           "https://learn.rald.cloud/developers",
+  auth:           "https://auth.rald.cloud/health",
+  identity_brain: "https://auth.rald.cloud/identity-brain/intelligence",
+  learn:          "https://learn.rald.cloud",
   ...serviceInfo(c),
 }));
 app.notFound((c) => c.json({ error: "Not found", path: c.req.path }, 404));
@@ -297,9 +310,10 @@ app.onError((err, c) => {
 });
 
 export default {
+  // ── HTTP handler ────────────────────────────────────────────────────────────
   async fetch(req: Request, env: Bindings, ctx: ExecutionContext): Promise<Response> {
-    // ── Health bypass — liveness probes must always get a 200 ──────────
     const pathname = new URL(req.url).pathname;
+    // Health bypass — liveness probes must always get a 200
     if (pathname === "/health" || pathname === "/healthz" || pathname === "/healthcheck" || pathname === "/readyz") {
       return app.fetch(req, env, ctx);
     }
@@ -315,5 +329,29 @@ export default {
       });
     }
     return app.fetch(req, env, ctx);
+  },
+
+  // ── Scheduled handler — Phase 1 Self-Healing Ops ───────────────────────────
+  // Cron schedule (defined in wrangler.toml [triggers]):
+  //   "0 * * * *"  — hourly: OTP cleanup + expired session deletion
+  //   "0 0 * * *"  — daily:  device cleanup + rotation alerts + health snapshot
+  async scheduled(event: ScheduledEvent, env: Bindings, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(
+      (async () => {
+        console.log(`[rald-auth-scheduled] cron fired: ${event.cron} at ${new Date().toISOString()}`);
+
+        // Both crons run hourly cleanup
+        const hourlyStats = await runHourlyCleanup(env);
+        console.log("[rald-auth-scheduled] hourly cleanup:", JSON.stringify(hourlyStats));
+
+        // Daily jobs (midnight UTC only)
+        if (event.cron === "0 0 * * *") {
+          const dailyStats = await runDailyCleanup(env);
+          console.log("[rald-auth-scheduled] daily cleanup:", JSON.stringify(dailyStats));
+
+          await runHealthSnapshot(env);
+        }
+      })()
+    );
   },
 };
