@@ -285,7 +285,36 @@ auth.post("/verify-otp", async (c) => {
   let verified = false;
   const isProduction = c.env.ENVIRONMENT === "production";
 
-  if (!c.env.TERMII_API_KEY && !isProduction || body.pinId === "dev-mode-pin-id") {
+  // SEC-OTP-002: Brute-force guard on verify attempts.
+  // A 6-digit OTP has 1 000 000 combinations. Without per-pinId throttling an
+  // attacker who observed a pinId (or reused a stolen one) could exhaust the
+  // full space in seconds. 5 attempts/pinId + 20 attempts/IP per 10-min window.
+  const kv = (c.env as unknown as Record<string, unknown>).RATE_LIMIT_KV as Parameters<typeof checkRateLimit>[0];
+  const pinAttemptCheck = await checkRateLimit(kv, {
+    key: `otp:verify:pin:${body.pinId}`,
+    limit: 5,
+    windowSeconds: 600,
+  });
+  if (!pinAttemptCheck.allowed) {
+    await writeAuditLog(db, { action: "rate_limited", ip, status: "blocked", metadata: { reason: "otp_verify_pin", phone: body.phone } });
+    return rateLimitResponse(pinAttemptCheck.resetAt);
+  }
+  const verifyIpCheck = await checkRateLimit(kv, {
+    key: `otp:verify:ip:${ip}`,
+    limit: 20,
+    windowSeconds: 600,
+  });
+  if (!verifyIpCheck.allowed) {
+    await writeAuditLog(db, { action: "rate_limited", ip, status: "blocked", metadata: { reason: "otp_verify_ip", phone: body.phone } });
+    return rateLimitResponse(verifyIpCheck.resetAt);
+  }
+
+  // SEC-OTP-001: dev-mode bypass MUST be inside !isProduction guard.
+  // Vulnerable: (!TERMII_KEY && !isProd) || pinId==="dev-mode-pin-id"
+  // JS operator precedence: right-hand OR branch has no production guard —
+  // any caller could POST pinId:"dev-mode-pin-id" + pin:"123456" in production
+  // to bypass OTP for any phone number without ever receiving a code.
+  if (!isProduction && (!c.env.TERMII_API_KEY || body.pinId === "dev-mode-pin-id")) {
     verified = body.pin === "123456";
   } else if (c.env.TERMII_API_KEY) {
     try {
