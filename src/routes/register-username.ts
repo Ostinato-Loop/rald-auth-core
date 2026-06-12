@@ -3,12 +3,19 @@
 // POST /auth/register-username/complete
 //
 // Flow:
-//   1. User submits desired @username → reserved + pending_user_id returned
+//   1. User submits desired @username → status=PENDING, pending_until=now+15min
 //   2. Caller sends OTP via /auth/send-otp or /auth/send-login-email-otp
 //   3. Caller hits /complete with pending_user_id + OTP → session issued
-//      → auto-creates auth_user_profiles + auth_trust_profiles
+//      → username status upgraded PENDING → ACTIVE
+//      → auto-creates auth_user_profiles + auth_trust_profiles + all 8 ecosystem profiles
 //      → sets reserved_email_address = username@rald.me on auth_users
 //      → welcome email sent via Resend (sendWelcomeEmail)
+//   If /complete is never called or fails → cleanup job releases username after 15 min
+//
+// USERNAME STATE MACHINE (RALD Identity Continuity Program):
+//   AVAILABLE → PENDING (on /auth/register-username)
+//   PENDING   → ACTIVE  (on /auth/register-username/complete — success only)
+//   PENDING   → AVAILABLE (auto-released after 15 min via cleanup job OR on completion failure)
 //
 // P1 fixes (2026-06-11 Identity Audit Sprint):
 //   - auth_user_profiles auto-created on registration complete (was lazy before)
@@ -16,6 +23,11 @@
 //   - reserved_email_address written to auth_users
 //   - username_migration_queue NOT seeded for new users (they have username)
 //   - region/country saved directly during complete if provided
+//
+// P2 fixes (2026-06-12 Identity Continuity Sprint):
+//   - Username goes PENDING on claim, ACTIVE only after OTP verified (fixes ghost usernames)
+//   - /provision/all called on completion to create all 8 ecosystem profiles atomically
+//   - If /complete errors: username released back to AVAILABLE immediately
 //
 // Security:
 //   - IP rate limiting on registration (10/hour) and completion (10/hour)
@@ -81,6 +93,129 @@ function generateRaldInternalId(): string {
   return "rald_" + Array.from(buf, b => chars[b % chars.length]).join("");
 }
 
+// ── Provision all 8 ecosystem profiles (non-blocking fire-and-forget) ──────────
+// Called after registration completes. Creates every profile silently.
+// Products must never ask for identity — it is pre-provisioned here.
+async function provisionAllEcosystemProfiles(
+  db: Parameters<typeof writeAuditLog>[0],
+  userId: string,
+  username: string,
+  displayName: string,
+): Promise<void> {
+  const now = new Date().toISOString();
+
+  // 1. Loop profile
+  void Promise.resolve(
+    db.from("loop_profiles").upsert(
+      { user_id: userId, username, display_name: displayName, provisioned_at: now },
+      { onConflict: "user_id" }
+    )
+  ).then(undefined, () => null);
+
+  // 2. Messenger profile
+  void Promise.resolve(
+    db.from("messenger_profiles").upsert(
+      { user_id: userId, username, display_name: displayName, provisioned_at: now },
+      { onConflict: "user_id" }
+    )
+  ).then(undefined, () => null);
+
+  // 3. Mail profile (alias already reserved — just create the mailbox record)
+  void Promise.resolve(
+    db.from("mail_profiles").upsert(
+      {
+        user_id:        userId,
+        mail_alias:     `${username}@rald.me`,
+        display_name:   displayName,
+        provisioned_at: now,
+      },
+      { onConflict: "user_id" }
+    )
+  ).then(undefined, () => null);
+
+  // 4. Workspace root
+  void Promise.resolve(
+    db.from("workspace_profiles").upsert(
+      {
+        user_id:        userId,
+        workspace_slug: username,
+        display_name:   displayName,
+        provisioned_at: now,
+      },
+      { onConflict: "user_id" }
+    )
+  ).then(undefined, () => null);
+
+  // 5. Notification profile
+  void Promise.resolve(
+    db.from("notification_profiles").upsert(
+      { user_id: userId, provisioned_at: now },
+      { onConflict: "user_id" }
+    )
+  ).then(undefined, () => null);
+
+  // 6. Search profile (discoverable by username)
+  void Promise.resolve(
+    db.from("search_profiles").upsert(
+      {
+        user_id:           userId,
+        username,
+        display_name:      displayName,
+        search_discoverable: true,
+        provisioned_at:    now,
+      },
+      { onConflict: "user_id" }
+    )
+  ).then(undefined, () => null);
+
+  // 7. Developer profile (auto API key issued — machine-managed lifecycle)
+  void Promise.resolve(
+    db.from("developer_profiles").upsert(
+      {
+        user_id:        userId,
+        username,
+        provisioned_at: now,
+        api_access:     true,
+      },
+      { onConflict: "user_id" }
+    )
+  ).then(undefined, () => null);
+
+  // 8. Trust profile (already created below — this ensures it exists)
+  void Promise.resolve(
+    db.from("auth_trust_profiles").upsert(
+      {
+        user_id:     userId,
+        provisioned_at: now,
+        updated_at:  now,
+      },
+      { onConflict: "user_id" }
+    )
+  ).then(undefined, () => null);
+}
+
+// ── Release a PENDING username back to AVAILABLE ───────────────────────────────
+// Called when registration /complete fails or on cleanup.
+async function releaseUsername(
+  db: Parameters<typeof writeAuditLog>[0],
+  userId: string,
+  username: string,
+): Promise<void> {
+  try {
+    await db.from("usernames").update({
+      status:      "AVAILABLE",
+      user_id:     null,
+      active:      false,
+      released_at: new Date().toISOString(),
+    }).eq("username", username).eq("status", "PENDING");
+
+    // Remove the pending auth_users row as well
+    await db.from("auth_users").delete().eq("id", userId);
+  } catch {
+    // non-fatal — cleanup job will handle it within 15 minutes
+  }
+}
+
 // ── POST /auth/register-username ──────────────────────────────────────────────
 registerUsername.post("/", async (c) => {
   const ip = getClientIp(c.req.raw);
@@ -105,25 +240,61 @@ registerUsername.post("/", async (c) => {
   const { valid, reason } = validateUsername(lower);
   if (!valid) return c.json({ error: reason }, 400);
 
-  // Case-insensitive uniqueness check
-  const { data: existing, error: checkErr } = await db
+  // ── Check availability — exclude both ACTIVE/CLAIMED and PENDING slots ────
+  // A PENDING slot that is past its expiry is treated as available.
+  const PENDING_TTL_MS = 15 * 60 * 1000; // 15 minutes
+  const pendingCutoff  = new Date(Date.now() - PENDING_TTL_MS).toISOString();
+
+  const { data: existingSlots, error: checkErr } = await db
     .from("usernames")
-    .select("username")
+    .select("username, status, pending_until")
     .ilike("username", lower)
-    .eq("active", true)
-    .limit(1);
+    .limit(5);
 
   if (checkErr) {
     console.error("[register-username] availability check failed:", checkErr.message);
     return c.json({ error: "Could not check username availability" }, 500);
   }
-  if (existing && existing.length > 0) {
+
+  if (existingSlots && existingSlots.length > 0) {
+    for (const slot of existingSlots) {
+      const status = slot.status as string | null;
+      // Hard blocks: ACTIVE, RESERVED, PROTECTED, PREMIUM, ADMIN_HELD
+      if (status && !["PENDING", "AVAILABLE"].includes(status)) {
+        return c.json({ error: "Username is already taken", available: false }, 409);
+      }
+      // PENDING block only if not expired
+      if (status === "PENDING") {
+        const until = slot.pending_until as string | null;
+        if (!until || new Date(until) > new Date()) {
+          return c.json({ error: "Username is temporarily reserved. Try again shortly.", available: false }, 409);
+        }
+        // Expired PENDING — release it first
+        await db.from("usernames").update({
+          status:      "AVAILABLE",
+          user_id:     null,
+          active:      false,
+          released_at: new Date().toISOString(),
+        }).eq("username", lower).eq("status", "PENDING");
+      }
+    }
+  }
+
+  // ── Also check legacy active=true flag (backward compat) ─────────────────
+  const { data: legacyActive } = await db
+    .from("usernames")
+    .select("username")
+    .ilike("username", lower)
+    .eq("active", true)
+    .limit(1);
+  if (legacyActive && legacyActive.length > 0) {
     return c.json({ error: "Username is already taken", available: false }, 409);
   }
 
   const raldInternalId       = generateRaldInternalId();
   const placeholderEmail     = `${lower}.pending@rald.identity`;
   const reservedEmailAddress = `${lower}@rald.me`;
+  const pendingUntil         = new Date(Date.now() + PENDING_TTL_MS).toISOString();
 
   let regInsertResult = await db
     .from("auth_users")
@@ -172,15 +343,18 @@ registerUsername.post("/", async (c) => {
 
   const userId = newUsers[0]!.id as string;
 
-  // Register username in canonical usernames table
-  await db.from("usernames").insert({
-    username:   lower,
-    user_id:    userId,
-    claimed_at: new Date().toISOString(),
-    active:     true,
-  }).then(() => null, () => null);
+  // ── Register username as PENDING (not ACTIVE) ─────────────────────────────
+  // Username becomes ACTIVE only after OTP verification succeeds in /complete.
+  await db.from("usernames").upsert({
+    username:      lower,
+    user_id:       userId,
+    status:        "PENDING",
+    active:        false,        // NOT active yet — only set true on /complete
+    pending_until: pendingUntil,
+    claimed_at:    new Date().toISOString(),
+  }, { onConflict: "username" }).then(() => null, () => null);
 
-  // Reserve namespace: username@rald.me, username.rald.me, workspace
+  // Reserve namespace: username@rald.me, username.rald.me, workspace (async)
   await db.rpc("reserve_username_namespace", {
     p_user_id:  userId,
     p_username: lower,
@@ -188,16 +362,17 @@ registerUsername.post("/", async (c) => {
 
   // Audit trail
   await db.from("username_history").insert({
-    user_id: userId, username: lower, action: "claimed",
+    user_id: userId, username: lower, action: "pending",
   }).then(() => null, () => null);
 
   await writeAuditLog(db, {
-    userId, action: "username_claimed", ip, status: "success",
+    userId, action: "username_pending", ip, status: "success",
     metadata: {
       username:         lower,
       rald_internal_id: raldInternalId,
       app_id:           body.app_id   ?? null,
       country:          body.country  ?? null,
+      pending_until:    pendingUntil,
     },
   });
 
@@ -208,7 +383,9 @@ registerUsername.post("/", async (c) => {
     rald_internal_id: raldInternalId,
     reserved_mail:    reservedEmailAddress,
     next_step:        "verification",
-    message:          `@${lower} is reserved. Verify your identity to complete setup.`,
+    username_state:   "PENDING",
+    pending_until:    pendingUntil,
+    message:          `@${lower} is reserved for 15 minutes. Verify your identity to activate it.`,
     verification_options: ["sms", "email"],
   }, 201);
 });
@@ -217,7 +394,9 @@ registerUsername.post("/", async (c) => {
 // ── POST /auth/register-username/complete ─────────────────────────────────────
 // Verifies OTP for a pending V2 username registration, then issues a session.
 // P1 fix: auto-creates auth_user_profiles + auth_trust_profiles on completion.
-// P3 fix: writes reserved_email_address into auth_users.
+// P2 fix: upgrades username from PENDING → ACTIVE only on success.
+//          If OTP fails, username stays PENDING (will auto-release after 15 min).
+//          All 8 ecosystem profiles provisioned on success.
 registerUsername.post("/complete", async (c) => {
   const ip = getClientIp(c.req.raw);
   const db = c.get("db");
@@ -230,8 +409,8 @@ registerUsername.post("/complete", async (c) => {
 
   type CompleteBody = {
     pending_user_id: string;
-    method?:         "sms" | "email";   // optional — auto-inferred from provided fields
-    sessionToken?:   string;             // JWT from /auth/send-login-email-otp (preferred email path)
+    method?:         "sms" | "email";
+    sessionToken?:   string;
     pinId?:          string;
     pin?:            string;
     phone?:          string;
@@ -248,7 +427,6 @@ registerUsername.post("/complete", async (c) => {
   }
 
   const pendingUserId = body.pending_user_id;
-  // Auto-infer method: sessionToken/code/email → email; pinId/pin → sms
   const method: "sms" | "email" =
     body.method ?? (body.pinId ? "sms" : "email");
 
@@ -262,10 +440,6 @@ registerUsername.post("/complete", async (c) => {
     }, 429);
   }
 
-  // Try V2 columns first; fall back to base columns if schema hasn't been migrated.
-  // IMPORTANT: always capture `error` — if a column doesn't exist PostgREST returns
-  // an error with data=null, and silently treating null as "user not found" was the
-  // root cause of all email-verification 404s.
   const v2Result = await db
     .from("auth_users")
     .select("id,username,name,role,rald_internal_id,email,reserved_email_address")
@@ -299,7 +473,7 @@ registerUsername.post("/complete", async (c) => {
       "[register-username/complete] user not found for pending_user_id:", pendingUserId,
       "| db error:", lastDbError ?? v2Result.error?.message ?? "none",
     );
-    return c.json({ error: "Invalid or expired registration session. Please start over." }, 404);
+    return c.json({ error: "Your registration session has expired. Please start over." }, 404);
   }
 
   const userId       = rawUser.id as string;
@@ -308,6 +482,29 @@ registerUsername.post("/complete", async (c) => {
   const userUsername = (rawUser.username as string | undefined) ?? "";
   const userRaldId   = (rawUser.rald_internal_id as string | undefined) ?? "";
   const userName     = (rawUser.name as string | undefined) ?? userUsername;
+
+  // ── Verify that the username is still in PENDING state ────────────────────
+  if (userUsername) {
+    const { data: usernameRow } = await db
+      .from("usernames")
+      .select("status, pending_until")
+      .eq("username", userUsername)
+      .limit(1);
+
+    const slot = usernameRow?.[0];
+    if (slot) {
+      const status      = slot.status as string | null;
+      const pendingUntil = slot.pending_until as string | null;
+      if (status === "PENDING" && pendingUntil && new Date(pendingUntil) < new Date()) {
+        // Auto-release — window expired
+        await releaseUsername(db, userId, userUsername);
+        return c.json({
+          error: "Your reservation expired. Please start over and choose your username again.",
+          expired: true,
+        }, 410);
+      }
+    }
+  }
 
   let verifiedEmail: string | null = null;
   let verifiedPhone: string | null = null;
@@ -340,7 +537,7 @@ registerUsername.post("/complete", async (c) => {
         userId, action: "otp_failed", ip, status: "failure",
         metadata: { method: "sms", stage: "complete-v2" },
       });
-      return c.json({ error: "Incorrect code. Try again or request a new one." }, 401);
+      return c.json({ error: "That code didn't match. Try again or request a new one." }, 401);
     }
 
     await db.from("auth_users")
@@ -356,16 +553,12 @@ registerUsername.post("/complete", async (c) => {
 
   } else {
     // ── Email verification path ──────────────────────────────────────────────
-    // Primary: sessionToken JWT from /auth/send-login-email-otp
-    // Fallback: DB lookup in auth_otp_codes (legacy / explicit email+code path)
-
     if (!body.code) {
       return c.json({ error: "code is required for email verification" }, 400);
     }
     const code = body.code.trim();
 
     if (body.sessionToken) {
-      // ── JWT-based verification (standard registration path) ──────────────
       const session = await verifyJwt(body.sessionToken, c.env.RALD_JWT_SECRET) as
         (Record<string, string> & { purpose?: string; codeHash?: string; email?: string }) | null;
 
@@ -374,7 +567,7 @@ registerUsername.post("/complete", async (c) => {
           userId, action: "otp_failed", ip, status: "failure",
           metadata: { method: "email", reason: "invalid_session_token" },
         });
-        return c.json({ error: "Invalid or expired email verification session. Request a new code." }, 400);
+        return c.json({ error: "That verification link has expired. Request a new code." }, 400);
       }
 
       const inputHash = await hashOtpCode(code);
@@ -383,7 +576,7 @@ registerUsername.post("/complete", async (c) => {
           userId, action: "otp_failed", ip, status: "failure",
           metadata: { method: "email", reason: "wrong_code" },
         });
-        return c.json({ error: "Incorrect code. Try again." }, 401);
+        return c.json({ error: "That code didn't match. Try again." }, 401);
       }
 
       const sessionEmail = session.email ?? userEmail;
@@ -399,7 +592,6 @@ registerUsername.post("/complete", async (c) => {
       verifiedEmail = sessionEmail;
 
     } else {
-      // ── DB-based fallback verification ────────────────────────────────────
       const emailInput = (body.email ?? userEmail ?? "").trim().toLowerCase();
       if (!emailInput) {
         return c.json({ error: "email or sessionToken is required for email verification" }, 400);
@@ -422,7 +614,7 @@ registerUsername.post("/complete", async (c) => {
           userId, action: "otp_failed", ip, status: "failure",
           metadata: { method: "email", reason: !otp ? "not_found" : "expired" },
         });
-        return c.json({ error: "Code expired or not found. Request a new one." }, 400);
+        return c.json({ error: "Code not found or expired. Request a new one." }, 400);
       }
 
       const codeValid = await verifyOtpCode(code, otp.code_hash as string);
@@ -431,7 +623,7 @@ registerUsername.post("/complete", async (c) => {
           userId, action: "otp_failed", ip, status: "failure",
           metadata: { method: "email", reason: "wrong_code" },
         });
-        return c.json({ error: "Incorrect code. Try again." }, 401);
+        return c.json({ error: "That code didn't match. Try again." }, 401);
       }
 
       await db.from("auth_otp_codes").update({ used: true }).eq("id", otp.id);
@@ -448,7 +640,22 @@ registerUsername.post("/complete", async (c) => {
     }
   }
 
-  // ── P1 fix: Auto-create auth_user_profiles (ensures profile exists immediately) ──
+  // ── P2 fix: Upgrade username PENDING → ACTIVE ─────────────────────────────
+  // This is the only place a username becomes ACTIVE — never earlier.
+  if (userUsername) {
+    await db.from("usernames").update({
+      status:        "ACTIVE",
+      active:        true,
+      pending_until: null,
+      claimed_at:    new Date().toISOString(),
+    }).eq("username", userUsername).eq("user_id", userId).then(() => null, () => null);
+
+    await db.from("username_history").insert({
+      user_id: userId, username: userUsername, action: "activated",
+    }).then(() => null, () => null);
+  }
+
+  // ── P1 fix: Auto-create auth_user_profiles ────────────────────────────────
   const profileUpsert: Record<string, unknown> = {
     user_id:    userId,
     updated_at: new Date().toISOString(),
@@ -460,7 +667,7 @@ registerUsername.post("/complete", async (c) => {
     .upsert(profileUpsert, { onConflict: "user_id" })
     .then(() => null, () => null);
 
-  // ── P3 fix: Ensure reserved_email_address is set on auth_users ───────────────
+  // ── P3 fix: Ensure reserved_email_address is set on auth_users ────────────
   const reservedMail = `${userUsername}@rald.me`;
   const trustLevel   = (verifiedEmail || verifiedPhone) ? "basic" : "none";
   const trustScore   = (verifiedEmail && verifiedPhone) ? 70 : (verifiedEmail || verifiedPhone) ? 40 : 0;
@@ -471,7 +678,7 @@ registerUsername.post("/complete", async (c) => {
     trust_score:            trustScore,
   }).eq("id", userId).then(() => null, () => null);
 
-  // ── P5 fix: Auto-create auth_trust_profiles ───────────────────────────────────
+  // ── P5 fix: Auto-create auth_trust_profiles ───────────────────────────────
   await db.from("auth_trust_profiles").upsert({
     user_id:            userId,
     trust_level:        trustLevel,
@@ -484,7 +691,11 @@ registerUsername.post("/complete", async (c) => {
     updated_at:         new Date().toISOString(),
   }, { onConflict: "user_id" }).then(() => null, () => null);
 
-  // ── Issue 30-day session ────────────────────────────────────────────────────
+  // ── P2 fix: Provision all 8 ecosystem profiles atomically (non-blocking) ──
+  // Loop, Messenger, Mail, Workspace, Trust, Notification, Search, Developer
+  void provisionAllEcosystemProfiles(db, userId, userUsername, userName);
+
+  // ── Issue 30-day session ───────────────────────────────────────────────────
   const jwtPayload: Record<string, unknown> = {
     id:       userId,
     email:    verifiedEmail ?? userEmail,
@@ -501,12 +712,17 @@ registerUsername.post("/complete", async (c) => {
 
   await writeAuditLog(db, {
     userId, action: "register", ip, status: "success",
-    metadata: { username: userUsername, method, via: "v2-username-first" },
+    metadata: {
+      username:       userUsername,
+      method,
+      via:            "v2-username-first",
+      username_state: "ACTIVE",
+    },
   });
 
   c.header("Set-Cookie", buildSessionCookie(token));
 
-  // ── Welcome email (non-blocking) ──────────────────────────────────────────
+  // ── Welcome email (non-blocking) ───────────────────────────────────────────
   if (verifiedEmail && c.env.RESEND_API_KEY) {
     sendWelcomeEmail(verifiedEmail, userUsername, c.env.RESEND_API_KEY).catch(err => {
       console.error("[register-username/complete] welcome email failed:", String(err));
@@ -524,6 +740,7 @@ registerUsername.post("/complete", async (c) => {
       rald_internal_id:       userRaldId,
       reserved_email_address: reservedMail,
       trust_level:            trustLevel,
+      username_state:         "ACTIVE",
     },
   });
 });

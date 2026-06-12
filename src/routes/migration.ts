@@ -1,6 +1,7 @@
 // RALD Auth Core — Identity Migration Routes
 // P4: Existing User Migration — username claim flow for users without usernames
 // P5: Identity Registry — verify and repair all identity records
+// P6 (Identity Continuity Sprint): verification_state canonical model
 //
 // Routes:
 //   GET  /migration/identity-status     — check user's identity completeness
@@ -8,7 +9,13 @@
 //   POST /migration/repair              — trigger identity repair for authenticated user
 //   GET  /migration/registry-check (admin) — audit identity registry for gaps
 //
-// LILCKY STUDIO LIMITED — 2026-06-11
+// verification_state canonical values (RALD Identity Continuity Program):
+//   NONE   — no verified contact method
+//   EMAIL  — verified email only
+//   PHONE  — verified phone only
+//   BOTH   — both email and phone verified (highest trust)
+//
+// LILCKY STUDIO LIMITED — 2026-06-12
 
 import { Hono } from "hono";
 import type { Bindings, Variables } from "../index";
@@ -18,8 +25,22 @@ import { writeAuditLog } from "../lib/audit";
 
 const migration = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
+// ── Verification state canonical model ────────────────────────────────────────
+type VerificationState = "NONE" | "EMAIL" | "PHONE" | "BOTH";
+
+function deriveVerificationState(
+  hasVerifiedEmail: boolean,
+  hasVerifiedPhone: boolean,
+): VerificationState {
+  if (hasVerifiedEmail && hasVerifiedPhone) return "BOTH";
+  if (hasVerifiedEmail) return "EMAIL";
+  if (hasVerifiedPhone) return "PHONE";
+  return "NONE";
+}
+
 // ── GET /migration/identity-status — full identity completeness check ─────────
 // P4: Called after login to determine what the user still needs to complete.
+// P6: Returns canonical verification_state alongside individual flags.
 migration.get("/identity-status", authMiddleware, async (c) => {
   const user = c.get("user")!;
   const db   = c.get("db");
@@ -51,6 +72,9 @@ migration.get("/identity-status", authMiddleware, async (c) => {
   const hasReservedMail  = !!(u.reserved_email_address as string | null);
 
   const identityComplete = hasUsername && (hasVerifiedPhone || hasVerifiedEmail);
+
+  // ── Canonical verification state (P6) ─────────────────────────────────────
+  const verificationState = deriveVerificationState(hasVerifiedEmail, hasVerifiedPhone);
 
   // Build list of required actions the user still needs to take
   const requiredActions: Array<{ action: string; priority: number; label: string; url: string }> = [];
@@ -88,6 +112,12 @@ migration.get("/identity-status", authMiddleware, async (c) => {
     trust_level:     u.trust_level ?? "none",
     trust_score:     u.trust_score ?? 0,
     identity_complete: identityComplete,
+
+    // ── Canonical verification state (single source of truth) ──────────────
+    // Use this in products instead of individual boolean flags.
+    // NONE | EMAIL | PHONE | BOTH
+    verification_state: verificationState,
+
     completeness: {
       has_username:       hasUsername,
       has_verified_phone: hasVerifiedPhone,
@@ -134,7 +164,6 @@ migration.post("/claim-username", authMiddleware, async (c) => {
 
   const lower = body.username.toLowerCase().trim();
 
-  // Validate format
   if (lower.length < 2 || lower.length > 20) {
     return c.json({ error: "Username must be 2–20 characters" }, 400);
   }
@@ -160,26 +189,56 @@ migration.post("/claim-username", authMiddleware, async (c) => {
     }, 409);
   }
 
-  // Check availability
+  // Check availability — exclude PENDING that hasn't expired yet
+  const now = new Date().toISOString();
   const [usernamesRes, authUsersRes] = await Promise.all([
-    db.from("usernames").select("username").eq("username", lower).eq("active", true).limit(1),
-    db.from("auth_users").select("id").ilike("username", lower).neq("id", user.id).limit(1),
+    db.from("usernames")
+      .select("username, status, pending_until")
+      .eq("username", lower)
+      .limit(5),
+    db.from("auth_users")
+      .select("id")
+      .ilike("username", lower)
+      .neq("id", user.id)
+      .limit(1),
   ]);
 
-  const taken = !!(usernamesRes.data?.length) || !!(authUsersRes.data?.length);
-  if (taken) return c.json({ error: "That username is already taken. Try another.", available: false }, 409);
+  if (usernamesRes.data?.length) {
+    for (const slot of usernamesRes.data) {
+      const status = slot.status as string | null;
+      if (!status || status === "AVAILABLE") continue;
+      if (status === "PENDING") {
+        const until = slot.pending_until as string | null;
+        if (!until || new Date(until) > new Date()) {
+          return c.json({ error: "That username is temporarily reserved. Try again shortly.", available: false }, 409);
+        }
+        // Expired PENDING — release it so we can claim
+        await db.from("usernames").update({
+          status:      "AVAILABLE",
+          user_id:     null,
+          active:      false,
+          released_at: now,
+        }).eq("username", lower).eq("status", "PENDING");
+        continue;
+      }
+      return c.json({ error: "That username is already taken. Try another.", available: false }, 409);
+    }
+  }
+  if (authUsersRes.data?.length) {
+    return c.json({ error: "That username is already taken. Try another.", available: false }, 409);
+  }
 
   const reservedMail = `${lower}@rald.me`;
 
-  // Claim username
-  await db.from("usernames").insert({
+  await db.from("usernames").upsert({
     username: lower, user_id: user.id,
-    claimed_at: new Date().toISOString(), active: true,
-  }).then(() => null, (e: unknown) => { throw e; });
+    claimed_at: now, active: true,
+    status: "ACTIVE",
+  }, { onConflict: "username" }).then(() => null, (e: unknown) => { throw e; });
 
   await db.from("auth_users").update({
     username:               lower,
-    username_set_at:        new Date().toISOString(),
+    username_set_at:        now,
     reserved_email_address: reservedMail,
     trust_level:            "basic",
     trust_score:            30,
@@ -193,7 +252,7 @@ migration.post("/claim-username", authMiddleware, async (c) => {
 
   // Mark migration complete
   await db.from("username_migration_queue")
-    .upsert({ user_id: user.id, completed_at: new Date().toISOString() }, { onConflict: "user_id" })
+    .upsert({ user_id: user.id, completed_at: now }, { onConflict: "user_id" })
     .then(() => null, () => null);
 
   // Sync trust profile
@@ -202,7 +261,7 @@ migration.post("/claim-username", authMiddleware, async (c) => {
 
   await writeAuditLog(db, {
     userId: user.id, action: "username_claimed", ip, status: "success",
-    metadata: { username: lower, via: "migration_claim" },
+    metadata: { username: lower, via: "migration_claim", username_state: "ACTIVE" },
   });
 
   return c.json({
@@ -213,6 +272,7 @@ migration.post("/claim-username", authMiddleware, async (c) => {
     message:                `@${lower} is yours. Welcome to the full RALD ecosystem.`,
     ecosystem_unlocked:     true,
     identity_complete:      true,
+    username_state:         "ACTIVE",
   }, 201);
 });
 
@@ -243,7 +303,14 @@ migration.post("/repair", authMiddleware, async (c) => {
 migration.get("/registry-check", adminMiddleware, async (c) => {
   const db = c.get("db");
 
-  const [totalRes, noUsernameRes, noProfileRes, noTrustRes, noReservedMailRes] = await Promise.all([
+  const [
+    totalRes,
+    noUsernameRes,
+    noProfileRes,
+    noTrustRes,
+    noReservedMailRes,
+    verificationBreakdownRes,
+  ] = await Promise.all([
     db.from("auth_users").select("id", { count: "exact", head: true }).eq("is_active", true),
     db.from("auth_users").select("id", { count: "exact", head: true }).is("username", null).eq("is_active", true),
     db.from("auth_users")
@@ -263,6 +330,13 @@ migration.get("/registry-check", adminMiddleware, async (c) => {
       .is("reserved_email_address", null)
       .not("username", "is", null)
       .eq("is_active", true),
+    // Verification state breakdown
+    Promise.all([
+      db.from("auth_users").select("id", { count: "exact", head: true }).eq("email_verified", true).eq("phone_verified", true).eq("is_active", true),
+      db.from("auth_users").select("id", { count: "exact", head: true }).eq("email_verified", true).eq("phone_verified", false).eq("is_active", true),
+      db.from("auth_users").select("id", { count: "exact", head: true }).eq("email_verified", false).eq("phone_verified", true).eq("is_active", true),
+      db.from("auth_users").select("id", { count: "exact", head: true }).eq("email_verified", false).eq("phone_verified", false).eq("is_active", true),
+    ]),
   ]);
 
   const total        = totalRes.count ?? 0;
@@ -271,6 +345,8 @@ migration.get("/registry-check", adminMiddleware, async (c) => {
   const noTrust      = noTrustRes.count ?? 0;
   const noReserved   = noReservedMailRes.count ?? 0;
 
+  const [bothRes, emailOnlyRes, phoneOnlyRes, noneRes] = verificationBreakdownRes;
+
   return c.json({
     total_active_users: total,
     gaps: {
@@ -278,6 +354,13 @@ migration.get("/registry-check", adminMiddleware, async (c) => {
       missing_profile_row:            noProfile,
       missing_trust_profile:          noTrust,
       missing_reserved_email_despite_username: noReserved,
+    },
+    // ── Canonical verification state breakdown ────────────────────────────
+    verification_state_breakdown: {
+      BOTH:  bothRes.count ?? 0,
+      EMAIL: emailOnlyRes.count ?? 0,
+      PHONE: phoneOnlyRes.count ?? 0,
+      NONE:  noneRes.count ?? 0,
     },
     health_score: total > 0
       ? Math.round(((total - noUsername) / total) * 100)
