@@ -10,7 +10,7 @@
 import { Hono } from "hono";
 import type { Bindings, Variables } from "../index";
 import { authMiddleware, adminMiddleware } from "../lib/middleware";
-import { verifyJwt, generateSecureToken } from "../lib/auth";
+import { verifyJwt, generateSecureToken, signJwt } from "../lib/auth";
 import { buildSessionCookie, clearSessionCookie, parseSessionCookie } from "../lib/cookie";
 import {
   isSessionActive,
@@ -328,6 +328,185 @@ session.get("/sso/silent", async (c) => {
     user: { id: payload.id, email: payload.email, role: payload.role },
     session: { expires_at: new Date(payload.exp * 1000).toISOString() },
     identity_hub: "profiles.rald.cloud",
+  });
+});
+
+
+// ── verifyJwtGrace — decode JWT with extended expiry tolerance ────────────────
+// Used by POST /auth/refresh to accept tokens within a grace window past expiry.
+async function verifyJwtGrace(
+  token: string,
+  secret: string,
+  graceSeconds: number
+): Promise<import("../lib/auth").JwtPayload | null> {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    const [header, body, sig] = parts as [string, string, string];
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign", "verify"]
+    );
+    const sigBytes = Uint8Array.from(
+      atob(sig.replace(/-/g, "+").replace(/_/g, "/")),
+      (c) => c.charCodeAt(0)
+    );
+    const valid = await crypto.subtle.verify(
+      "HMAC", key, sigBytes,
+      new TextEncoder().encode(`${header}.${body}`)
+    );
+    if (!valid) return null;
+    const payload = JSON.parse(
+      atob(body.replace(/-/g, "+").replace(/_/g, "/"))
+    ) as import("../lib/auth").JwtPayload;
+    const now = Math.floor(Date.now() / 1000);
+    // Accept tokens up to graceSeconds past their expiry
+    if (payload.exp + graceSeconds < now) return null;
+    return payload;
+  } catch { return null; }
+}
+
+// ── POST /auth/refresh ────────────────────────────────────────────────────────
+/**
+ * Silent session refresh — sliding 30-day window.
+ * Sprint: Hardening Phase 6 · Session Hardening · 2026-06-12
+ *
+ * Strategy:
+ *   1. Read rald_session cookie (Authorization: Bearer as fallback)
+ *   2. Verify JWT with 7-day grace window for tokens that slipped through
+ *   3. Check KV session is active and not revoked
+ *   4. Issue a new JWT with fresh 30-day expiry
+ *   5. Update KV session TTL to 30 more days
+ *   6. Set new HttpOnly ecosystem cookie
+ *
+ * Called by RALD products on every app open / tab focus.
+ * LILCKY STUDIO LIMITED
+ */
+session.post("/auth/refresh", async (c) => {
+  // ── 1. Extract token ────────────────────────────────────────────────────────
+  const cookieToken = parseSessionCookie(c.req.header("Cookie"));
+  const authHeader  = c.req.header("Authorization");
+  const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  const token       = cookieToken ?? bearerToken;
+
+  if (!token) {
+    return c.json(
+      { ok: false, reason: "no_session", redirect: "https://profiles.rald.cloud/login" },
+      401
+    );
+  }
+
+  // ── 2. Verify JWT (with 7-day grace window) ─────────────────────────────────
+  let payload = await verifyJwt(token, c.env.RALD_JWT_SECRET);
+  if (!payload) {
+    payload = await verifyJwtGrace(token, c.env.RALD_JWT_SECRET, 7 * 86400);
+  }
+  if (!payload) {
+    c.header("Set-Cookie", clearSessionCookie());
+    return c.json(
+      { ok: false, reason: "token_invalid_or_too_old", redirect: "https://profiles.rald.cloud/login" },
+      401
+    );
+  }
+
+  const p          = payload as unknown as Record<string, unknown>;
+  const sessionId  = (p.session_id ?? p.sid ?? null) as string | null;
+  const kv         = getSessionKv(c.env);
+
+  // ── 3. KV liveness checks ───────────────────────────────────────────────────
+  if (kv) {
+    const suspended = await isUserSuspended(kv, payload.id);
+    if (suspended) {
+      c.header("Set-Cookie", clearSessionCookie());
+      return c.json(
+        { ok: false, reason: "account_suspended", redirect: "https://profiles.rald.cloud/suspended" },
+        403
+      );
+    }
+    if (sessionId) {
+      const { active, reason } = await isSessionActive(kv, sessionId);
+      if (!active) {
+        c.header("Set-Cookie", clearSessionCookie());
+        return c.json({ ok: false, reason, redirect: "https://profiles.rald.cloud/login" }, 401);
+      }
+    }
+  }
+
+  // ── 4. Fetch current user record ────────────────────────────────────────────
+  const db = c.get("db");
+  const { data: user } = await db
+    .from("auth_users")
+    .select("id,email,username,name,role,trust_level,status")
+    .eq("id", payload.id)
+    .single();
+
+  if (!user || user.status === "suspended") {
+    c.header("Set-Cookie", clearSessionCookie());
+    return c.json(
+      {
+        ok: false,
+        reason: user?.status === "suspended" ? "account_suspended" : "user_not_found",
+        redirect: "https://profiles.rald.cloud/login",
+      },
+      401
+    );
+  }
+
+  // ── 5. Issue new JWT with fresh 30-day expiry ───────────────────────────────
+  const SESSION_TTL  = 2_592_000; // 30 days
+  const newSessionId = sessionId ?? (await generateSecureToken(16));
+  const expiresAt    = new Date(Date.now() + SESSION_TTL * 1000).toISOString();
+
+  const newToken = await signJwt(
+    {
+      id:         user.id,
+      email:      user.email,
+      username:   user.username    ?? null,
+      name:       user.name        ?? null,
+      role:       user.role        ?? "user",
+      trust:      user.trust_level ?? "none",
+      session_id: newSessionId,
+      sso_v:      2,
+      via:        "refresh",
+      app_id:     (p.appId ?? p.app_id ?? null) as string | null,
+    },
+    c.env.RALD_JWT_SECRET,
+    SESSION_TTL
+  );
+
+  // ── 6. Extend KV session TTL ────────────────────────────────────────────────
+  if (kv) {
+    await createKvSession(kv, {
+      session_id: newSessionId,
+      user_id:    user.id,
+      device_id:  (p.device_id ?? null) as string | null,
+      created_at: new Date().toISOString(),
+      expires_at: expiresAt,
+      app_id:     (p.appId ?? p.app_id ?? null) as string | undefined,
+      ip:         getClientIp(c.req.raw),
+      user_agent: c.req.header("User-Agent") ?? undefined,
+    });
+  }
+
+  // ── 7. Set refreshed cookie ─────────────────────────────────────────────────
+  c.header("Set-Cookie", buildSessionCookie(newToken, SESSION_TTL));
+
+  return c.json({
+    ok:         true,
+    token:      newToken,
+    session_id: newSessionId,
+    expires_at: expiresAt,
+    user: {
+      id:       user.id,
+      email:    user.email,
+      username: user.username    ?? null,
+      name:     user.name        ?? null,
+      role:     user.role        ?? "user",
+      trust:    user.trust_level ?? "none",
+    },
   });
 });
 
