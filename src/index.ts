@@ -41,6 +41,7 @@ import countryRoutes            from "./routes/country";
 import expansionRoutes          from "./routes/expansion";
 import smartLoginRoute           from "./routes/smart-login";
 import adminUsernameRoutes       from "./routes/admin-username";
+import identityRoutes            from "./routes/identity";
 
 export type Bindings = {
   SUPABASE_URL:              string;
@@ -262,6 +263,7 @@ app.route("/admin/metrics",          metricsRoutes);
 app.route("/admin/expansion",        expansionRoutes);
 app.route("/migration",              migrationRoutes);
 app.route("/country",                countryRoutes);
+app.route("/identity",               identityRoutes);
 app.route("/",                       sessionRoutes);
 
 // ── Root ──────────────────────────────────────────────────────────────────────
