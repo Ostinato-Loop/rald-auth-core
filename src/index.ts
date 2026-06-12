@@ -90,6 +90,8 @@ const STATIC_ORIGINS = new Set([
   "https://analytics.rald.cloud",
   "https://business.rald.cloud",
   "https://ostloop.name.ng",
+  "https://identity.rald.cloud",
+  "https://rald-identity.pages.dev",
   "https://rald-auth-ui.pages.dev",
   "https://rald-app.pages.dev",
   "https://rald-control-center.pages.dev",
