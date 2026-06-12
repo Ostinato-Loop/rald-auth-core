@@ -178,6 +178,17 @@ username.post("/claim", authMiddleware, async (c) => {
   await db.rpc("repair_identity_records", { p_user_id: user.id })
     .then(() => null, () => null);
 
+  // USN-001: Fire cross-app username propagation event via the Event Bus.
+  // Messenger, Profiles, and all ecosystem apps consume this to sync their
+  // local profile caches — ensuring username is set everywhere, automatically.
+  await db.from("rald_events").insert({
+    event_type:  "username_claimed",
+    source_app:  "rald-auth-core",
+    user_id:     user.id,
+    payload:     JSON.stringify({ username: lower, reserved_mail: reservedMail }),
+    created_at:  new Date().toISOString(),
+  }).then(() => null, () => null);
+
   await writeAuditLog(db, {
     userId:   user.id,
     action:   "username_claimed",
