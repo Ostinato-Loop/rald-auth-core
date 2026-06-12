@@ -176,6 +176,52 @@ jobs:
             -d '[{"country_code":"ZA","country_name":"South Africa","status":"WAITLIST","demand_score":65},{"country_code":"IN","country_name":"India","status":"WAITLIST","demand_score":80},{"country_code":"ID","country_name":"Indonesia","status":"WAITLIST","demand_score":74}]' \
             && echo "SEED: ZA/IN/ID (WAITLIST) ✓" || echo "WARNING: wave 3 seed failed"
           echo "Country registry seed complete."
+
+      # ── C-CERT-004: Centralized Log Shipping (OpenObserve) ─────────────────
+      - name: Push OpenObserve secrets to worker (C-CERT-004)
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          OPEN_OBSERVE_API_KEY: ${{ secrets.OPEN_OBSERVE_API_KEY }}
+          OPEN_OBSERVE_ENDPOINT_AUTH: ${{ secrets.OPEN_OBSERVE_ENDPOINT_AUTH }}
+        run: |
+          if [ -n "$OPEN_OBSERVE_API_KEY" ]; then
+            echo "$OPEN_OBSERVE_API_KEY" | npx wrangler secret put OPEN_OBSERVE_API_KEY --name rald-auth
+            echo "$OPEN_OBSERVE_ENDPOINT_AUTH" | npx wrangler secret put OPEN_OBSERVE_ENDPOINT --name rald-auth
+            echo "OpenObserve secrets pushed to rald-auth (C-CERT-004 resolved)"
+          else
+            echo "WARNING: OPEN_OBSERVE_API_KEY not set — add to GitHub org secrets"
+          fi
+
+      # ── Phase 1: Machine Identity + Admin alerting secrets ─────────────────
+      - name: Push MACHINE_IDENTITY_SECRET to worker
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          MACHINE_IDENTITY_SECRET: ${{ secrets.MACHINE_IDENTITY_SECRET_AUTH }}
+        run: |
+          if [ -n "$MACHINE_IDENTITY_SECRET" ]; then
+            echo "$MACHINE_IDENTITY_SECRET" | npx wrangler secret put MACHINE_IDENTITY_SECRET --name rald-auth
+            echo "MACHINE_IDENTITY_SECRET pushed to rald-auth (C-CERT-001 resolved)"
+          else
+            echo "WARNING: MACHINE_IDENTITY_SECRET_AUTH not set — run scripts/provision-machine-identities.sh first"
+          fi
+
+      - name: Push ADMIN_USER_ID to worker
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ADMIN_USER_ID: ${{ secrets.RALD_ADMIN_USER_ID }}
+        run: |
+          if [ -n "$ADMIN_USER_ID" ]; then
+            echo "$ADMIN_USER_ID" | npx wrangler secret put ADMIN_USER_ID --name rald-auth
+            echo "ADMIN_USER_ID pushed to rald-auth"
+          else
+            echo "WARNING: RALD_ADMIN_USER_ID not set — rotation alerts will log-only, not send push/email"
+          fi
       - name: Record deployment audit
         if: always()
         run: |
