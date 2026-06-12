@@ -97,7 +97,16 @@ export type AuditAction =
   | "country_restricted"
   | "country_status_changed"
   | "country_added"
-  | "payrald_gate_updated";
+  | "payrald_gate_updated"
+  // Developer Platform — 2026-06-12
+  | "developer.onboarded"
+  | "api_key.created"
+  | "api_key.rotated"
+  | "api_key.revoked"
+  | "app.created"
+  | "app.updated"
+  | "webhook.created"
+  | "webhook.deleted";
 
 export interface AuditEntry {
   userId?: string | null;
