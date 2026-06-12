@@ -46,6 +46,7 @@ import developerRoutes          from "./routes/developer";
 import machineRoutes            from "./routes/machine";
 import trustRoutes              from "./routes/trust";
 import permissionsRoutes        from "./routes/permissions";
+import { requestLogger }         from "./lib/logger";
 
 export type Bindings = {
   SUPABASE_URL:              string;
@@ -59,6 +60,8 @@ export type Bindings = {
   ENVIRONMENT:               string;
   RATE_LIMIT_KV:             KVNamespace;
   RALD_SESSION_KV:           KvSessionStore;
+  OPEN_OBSERVE_API_KEY?:     string;  // OpenObserve ingest key (C-CERT-004)
+  OPEN_OBSERVE_ENDPOINT?:    string;  // e.g. https://observe.rald.cloud/api/rald/rald-auth-core/_json
 };
 
 export type Variables = {
@@ -110,6 +113,9 @@ function isAllowedOrigin(origin: string): boolean {
   if (/^https:\/\/[a-z0-9-]+\.replit\.(app|dev)$/.test(origin)) return true;
   return false;
 }
+
+// ── Request logger — OpenObserve log shipping ────────────────────────────────
+app.use("*", requestLogger("rald-auth-core"));
 
 app.use("*", cors({
   origin: (origin) => (isAllowedOrigin(origin) ? origin : null),
