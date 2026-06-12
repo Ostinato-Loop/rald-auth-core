@@ -4,6 +4,7 @@
 // Phase H.2: Added privacy, verification, role, ecosystem action types
 // Phase V2.1: Added QR login and WebAuthn audit actions
 // Phase 4 (Emergency Stabilization Sprint): Added admin username console actions
+// Sprint 2026-06-14: Added machine identity, permission, trust action types
 // LILCKY STUDIO LIMITED
 
 import { SupabaseClient } from "@supabase/supabase-js";
@@ -106,7 +107,15 @@ export type AuditAction =
   | "app.created"
   | "app.updated"
   | "webhook.created"
-  | "webhook.deleted";
+  | "webhook.deleted"
+  // Machine Identity — Sprint 2026-06-14
+  | "machine_identity.provisioned"
+  | "machine_identity.rotated"
+  | "machine_identity.revoked"
+  // Permissions — Sprint 2026-06-14
+  | "permission.override"
+  // Trust — Sprint 2026-06-14
+  | "trust.recomputed";
 
 export interface AuditEntry {
   userId?: string | null;

@@ -11,14 +11,20 @@ import { writeAuditLog } from "../lib/audit";
 
 const trust = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
+// Shape returned by the compute_trust_score Supabase RPC
+interface TrustScoreResult {
+  score: number;
+  tier: string;
+}
+
 // ── GET /trust/score — get own trust score ────────────────────────────────────
 trust.get("/trust/score", authMiddleware, async (c) => {
   const user = c.get("user")!;
   const db = c.get("db");
   const { data } = await db.from("trust_scores").select("*").eq("user_id", user.id).single();
   if (!data) {
-    // Compute on demand if not yet cached
-    const { data: computed } = await db.rpc("compute_trust_score", { p_user_id: user.id }).single();
+    const { data: computedRaw } = await db.rpc("compute_trust_score", { p_user_id: user.id }).single();
+    const computed = computedRaw as TrustScoreResult | null;
     return c.json({ user_id: user.id, score: computed?.score ?? 0, tier: computed?.tier ?? "none", computed_now: true });
   }
   return c.json(data);
@@ -28,9 +34,10 @@ trust.get("/trust/score", authMiddleware, async (c) => {
 trust.post("/trust/compute", authMiddleware, async (c) => {
   const user = c.get("user")!;
   const db = c.get("db");
-  const { data, error } = await db.rpc("compute_trust_score", { p_user_id: user.id }).single();
+  const { data: computedRaw, error } = await db.rpc("compute_trust_score", { p_user_id: user.id }).single();
   if (error) return c.json({ error: "Failed to compute trust score" }, 500);
-  return c.json({ user_id: user.id, score: data?.score ?? 0, tier: data?.tier ?? "none" });
+  const computed = computedRaw as TrustScoreResult | null;
+  return c.json({ user_id: user.id, score: computed?.score ?? 0, tier: computed?.tier ?? "none" });
 });
 
 // ── GET /trust/score/:userId — get user trust (admin or internal) ─────────────
@@ -39,7 +46,8 @@ trust.get("/trust/score/:userId", adminMiddleware, async (c) => {
   const userId = c.req.param("userId");
   const { data } = await db.from("trust_scores").select("*").eq("user_id", userId).single();
   if (!data) {
-    const { data: computed } = await db.rpc("compute_trust_score", { p_user_id: userId }).single();
+    const { data: computedRaw } = await db.rpc("compute_trust_score", { p_user_id: userId }).single();
+    const computed = computedRaw as TrustScoreResult | null;
     return c.json({ user_id: userId, score: computed?.score ?? 0, tier: computed?.tier ?? "none", computed_now: true });
   }
   return c.json(data);
@@ -51,10 +59,14 @@ trust.post("/trust/compute/:userId", adminMiddleware, async (c) => {
   const admin = c.get("user")!;
   const ip = getClientIp(c.req.raw);
   const userId = c.req.param("userId");
-  const { data, error } = await db.rpc("compute_trust_score", { p_user_id: userId }).single();
+  const { data: computedRaw, error } = await db.rpc("compute_trust_score", { p_user_id: userId }).single();
   if (error) return c.json({ error: "Failed to compute trust score" }, 500);
-  await writeAuditLog(db, { userId: admin.id, action: "trust.recomputed", ip, status: "success", metadata: { target_user_id: userId, score: data?.score, tier: data?.tier } });
-  return c.json({ user_id: userId, score: data?.score ?? 0, tier: data?.tier ?? "none" });
+  const computed = computedRaw as TrustScoreResult | null;
+  await writeAuditLog(db, {
+    userId: admin.id, action: "trust.recomputed", ip, status: "success",
+    metadata: { target_user_id: userId, score: computed?.score, tier: computed?.tier },
+  });
+  return c.json({ user_id: userId, score: computed?.score ?? 0, tier: computed?.tier ?? "none" });
 });
 
 // ── GET /trust/distribution — trust tier distribution (admin) ─────────────────

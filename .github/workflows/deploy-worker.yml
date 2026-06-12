@@ -33,7 +33,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: d5a1cd03b76f467430034af64a7062fd
-          command: deploy --env production
+          command: deploy
           secrets: |
             SUPABASE_SERVICE_ROLE_KEY
             RALD_JWT_SECRET
@@ -42,8 +42,6 @@ jobs:
             RESEND_API_KEY
             CLERK_SECRET_KEY
             CLERK_PUBLISHABLE_KEY
-            MACHINE_KEY_ID
-            MACHINE_KEY_SECRET
         env:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           RALD_JWT_SECRET: ${{ secrets.RALD_JWT_SECRET }}
@@ -52,8 +50,6 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
           CLERK_PUBLISHABLE_KEY: ${{ secrets.CLERK_PUBLISHABLE_KEY }}
-          MACHINE_KEY_ID: ${{ secrets.MACHINE_KEY_ID }}
-          MACHINE_KEY_SECRET: ${{ secrets.MACHINE_KEY_SECRET }}
 
       - name: Smoke test
         run: |
