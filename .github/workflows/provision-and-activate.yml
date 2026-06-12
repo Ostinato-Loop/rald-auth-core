@@ -7,36 +7,263 @@ on:
         description: "Dry run - generate secrets but skip Supabase + wrangler writes"
         type: boolean
         default: false
+      skip_ddl:
+        description: "Skip DDL step (use if machine_identities table already exists)"
+        type: boolean
+        default: false
 
 concurrency:
   group: provision-machine-identities
   cancel-in-progress: false
 
-# Generates cryptographic machine identity secrets for all 8 RALD services,
-# upserts them into Supabase (matching on service_name), pushes MACHINE_KEY_ID
-# + MACHINE_KEY_SECRET to each CF Worker via wrangler, and activates scheduled
-# cron triggers for rald-auth and rald-notify via the CF REST API.
-#
-# Algorithm mirrors machine.ts exactly:
-#   secret   = 32 random bytes -> hex (64 chars)
-#   salt     = 16 random bytes -> hex (32 chars)
-#   key_hash = SHA-256(secret + ":" + salt) -> hex
-#   MACHINE_KEY_SECRET delivered to worker = "key_id:secret"
-#
-# Required GitHub org secrets:
-#   CLOUDFLARE_API_TOKEN      Workers:Edit + Scheduled Tasks:Edit
-#   CLOUDFLARE_ACCOUNT_ID
-#   SUPABASE_SERVICE_ROLE_KEY
-#   SUPABASE_URL              (fallback hardcoded below)
-#
 # Sprint: Public Beta Hardening - C-CERT-001 - 2026-06-15
 # LILCKY STUDIO LIMITED
+#
+# Jobs:
+#   1. apply-ddl        - Creates machine_identities + audit_log tables (idempotent)
+#   2. provision        - Generates secrets, upserts to Supabase, pushes to CF Workers
+#   3. activate-crons   - Enables scheduled crons on rald-auth + rald-notify via CF API
+#
+# Required GitHub org secrets:
+#   CLOUDFLARE_API_TOKEN        Workers:Edit + Scheduled Tasks:Edit
+#   CLOUDFLARE_ACCOUNT_ID
+#   SUPABASE_SERVICE_ROLE_KEY   For DML (upsert provisioning records)
+#   SUPABASE_URL                Optional - hardcoded fallback used if missing
+#
+# For the DDL step (apply-ddl job) ALSO required:
+#   SUPABASE_ACCESS_TOKEN       Supabase personal access token (Management API)
+#                               Get it: https://supabase.com/dashboard/account/tokens
+#                               Add as org secret at: github.com/orgs/Ostinato-Loop/settings/secrets/actions
+#
+# If SUPABASE_ACCESS_TOKEN is absent, the apply-ddl job is skipped.
+# The provision job will then fail with a clear diagnostic if the table
+# still does not exist. In that case:
+#   Option A: add SUPABASE_ACCESS_TOKEN and re-run this workflow.
+#   Option B: apply supabase/migrations/20260612400000_machine_identity.sql
+#             manually in the Supabase SQL Editor, then re-run with skip_ddl=true.
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: Apply DDL migrations (machine_identities schema)
+  # ---------------------------------------------------------------------------
+  apply-ddl:
+    name: Apply machine_identities DDL (Management API)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL || 'https://onxdcikfttdmnhofsuwo.supabase.co' }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      SKIP_DDL: ${{ inputs.skip_ddl || 'false' }}
+
+    steps:
+      - name: Apply DDL via Supabase Management API
+        run: |
+          node << 'JSEOF'
+          const PROJECT_REF  = 'onxdcikfttdmnhofsuwo';
+          const ACCESS_TOKEN = process.env.SUPABASE_ACCESS_TOKEN;
+          const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
+          const SUPABASE_URL = process.env.SUPABASE_URL;
+          const DRY_RUN      = process.env.DRY_RUN === 'true';
+          const SKIP_DDL     = process.env.SKIP_DDL === 'true';
+
+          if (SKIP_DDL) {
+            console.log('SKIP_DDL=true — skipping DDL step.');
+            process.exit(0);
+          }
+          if (DRY_RUN) {
+            console.log('[DRY RUN] DDL step skipped in dry run mode.');
+            process.exit(0);
+          }
+
+          // First, check if table already exists via PostgREST (service key)
+          if (SERVICE_KEY) {
+            const check = await fetch(SUPABASE_URL + '/rest/v1/machine_identities?limit=0', {
+              headers: { apikey: SERVICE_KEY, Authorization: 'Bearer ' + SERVICE_KEY }
+            });
+            if (check.ok) {
+              console.log('machine_identities table already exists (HTTP ' + check.status + ') — DDL not needed.');
+              process.exit(0);
+            }
+            console.log('Table check: HTTP ' + check.status + ' — table not found, DDL required.');
+          }
+
+          if (!ACCESS_TOKEN) {
+            console.error('');
+            console.error('ERROR: machine_identities table does not exist and SUPABASE_ACCESS_TOKEN is not set.');
+            console.error('');
+            console.error('To fix, choose ONE of:');
+            console.error('  A) Add SUPABASE_ACCESS_TOKEN to GitHub org secrets:');
+            console.error('     1. Go to https://supabase.com/dashboard/account/tokens');
+            console.error('     2. Generate a personal access token.');
+            console.error('     3. Add it at github.com/orgs/Ostinato-Loop/settings/secrets/actions');
+            console.error('        Name: SUPABASE_ACCESS_TOKEN');
+            console.error('     4. Re-run this workflow.');
+            console.error('');
+            console.error('  B) Apply the DDL manually in Supabase SQL Editor:');
+            console.error('     Open: https://supabase.com/dashboard/project/' + PROJECT_REF + '/sql');
+            console.error('     Run: supabase/migrations/20260612400000_machine_identity.sql');
+            console.error('     Then re-run this workflow with skip_ddl=true.');
+            console.error('');
+            process.exit(1);
+          }
+
+          // ── Apply DDL via Management API ──────────────────────────────────
+          const MGMT = 'https://api.supabase.com/v1/projects/' + PROJECT_REF + '/database/query';
+          const headers = { Authorization: 'Bearer ' + ACCESS_TOKEN, 'Content-Type': 'application/json' };
+
+          async function runSQL(label, sql) {
+            const res  = await fetch(MGMT, { method: 'POST', headers, body: JSON.stringify({ query: sql }) });
+            const body = await res.json().catch(() => ({ error: 'non-JSON' }));
+            if (!res.ok) {
+              const msg = JSON.stringify(body);
+              // "already exists" errors are fine for IF NOT EXISTS patterns
+              if (msg.includes('already exists') || msg.includes('does not exist')) {
+                console.log('  [SKIP idempotent] ' + label + ': ' + msg.slice(0, 120));
+                return;
+              }
+              throw new Error('[' + label + '] HTTP ' + res.status + ': ' + msg.slice(0, 300));
+            }
+            console.log('  [OK] ' + label);
+          }
+
+          console.log('\n=== Applying machine_identities DDL ===\n');
+
+          // Step 0: updated_at trigger function (referenced by the table trigger)
+          await runSQL('update_identity_updated_at function', `
+            CREATE OR REPLACE FUNCTION update_identity_updated_at()
+            RETURNS TRIGGER LANGUAGE plpgsql AS $$
+            BEGIN
+              NEW.updated_at = NOW();
+              RETURN NEW;
+            END;
+            $$;
+          `);
+
+          // Step 1: machine_identities table
+          await runSQL('machine_identities CREATE TABLE', `
+            CREATE TABLE IF NOT EXISTS machine_identities (
+              id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+              service_name     TEXT NOT NULL UNIQUE,
+              display_name     TEXT NOT NULL,
+              description      TEXT NOT NULL DEFAULT '',
+              environment      TEXT NOT NULL DEFAULT 'production'
+                                 CHECK (environment IN ('production','staging','development')),
+              key_id           TEXT NOT NULL UNIQUE,
+              key_hash         TEXT NOT NULL,
+              key_salt         TEXT NOT NULL,
+              scopes           TEXT[] NOT NULL DEFAULT '{}',
+              allowed_services TEXT[] NOT NULL DEFAULT '{}',
+              ip_allowlist     INET[] NOT NULL DEFAULT '{}',
+              status           TEXT NOT NULL DEFAULT 'active'
+                                 CHECK (status IN ('active','suspended','revoked')),
+              created_by       TEXT NOT NULL DEFAULT 'system',
+              last_rotated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+              rotation_due_at  TIMESTAMPTZ NOT NULL DEFAULT (now() + INTERVAL '90 days'),
+              revoked_at       TIMESTAMPTZ,
+              created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+              updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+          `);
+
+          // Step 2: indexes
+          await runSQL('machine_identities indexes', `
+            CREATE INDEX IF NOT EXISTS machine_identities_key_id_idx ON machine_identities(key_id);
+            CREATE INDEX IF NOT EXISTS machine_identities_status_idx ON machine_identities(status);
+            CREATE INDEX IF NOT EXISTS machine_identities_env_idx    ON machine_identities(environment);
+          `);
+
+          // Step 3: RLS
+          await runSQL('machine_identities RLS', `
+            ALTER TABLE machine_identities ENABLE ROW LEVEL SECURITY;
+          `);
+
+          await runSQL('machine_identities RLS policy', `
+            DO $$ BEGIN
+              IF NOT EXISTS (
+                SELECT 1 FROM pg_policies WHERE tablename='machine_identities' AND policyname='machine_identities: service role only'
+              ) THEN
+                CREATE POLICY "machine_identities: service role only"
+                  ON machine_identities FOR ALL USING (true) WITH CHECK (true);
+              END IF;
+            END $$;
+          `);
+
+          // Step 4: audit log table
+          await runSQL('machine_identity_audit_log CREATE TABLE', `
+            CREATE TABLE IF NOT EXISTS machine_identity_audit_log (
+              id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+              identity_id  UUID NOT NULL,
+              action       TEXT NOT NULL,
+              ip           TEXT,
+              metadata     JSONB NOT NULL DEFAULT '{}',
+              created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+          `);
+
+          await runSQL('machine_identity_audit_log indexes', `
+            CREATE INDEX IF NOT EXISTS machine_identity_audit_identity_idx ON machine_identity_audit_log(identity_id);
+            CREATE INDEX IF NOT EXISTS machine_identity_audit_created_idx  ON machine_identity_audit_log(created_at DESC);
+          `);
+
+          await runSQL('machine_identity_audit_log RLS', `
+            ALTER TABLE machine_identity_audit_log ENABLE ROW LEVEL SECURITY;
+          `);
+
+          await runSQL('machine_identity_audit_log RLS policy', `
+            DO $$ BEGIN
+              IF NOT EXISTS (
+                SELECT 1 FROM pg_policies WHERE tablename='machine_identity_audit_log' AND policyname='machine_identity_audit: service role only'
+              ) THEN
+                CREATE POLICY "machine_identity_audit: service role only"
+                  ON machine_identity_audit_log FOR ALL USING (true) WITH CHECK (true);
+              END IF;
+            END $$;
+          `);
+
+          // Step 5: updated_at trigger on machine_identities
+          await runSQL('machine_identities updated_at trigger', `
+            DROP TRIGGER IF EXISTS trg_machine_identities_updated_at ON machine_identities;
+            CREATE TRIGGER trg_machine_identities_updated_at
+              BEFORE UPDATE ON machine_identities
+              FOR EACH ROW EXECUTE FUNCTION update_identity_updated_at();
+          `);
+
+          // Step 6: rotation_alerts view (canonical version — uses days_until_rotation INT)
+          await runSQL('machine_identity_rotation_alerts view', `
+            CREATE OR REPLACE VIEW machine_identity_rotation_alerts AS
+            SELECT
+              service_name,
+              display_name,
+              last_rotated_at,
+              rotation_due_at,
+              EXTRACT(DAY FROM (rotation_due_at - now()))::INT AS days_until_rotation,
+              CASE
+                WHEN rotation_due_at < now()                         THEN 'OVERDUE'
+                WHEN rotation_due_at < now() + INTERVAL '7 days'    THEN 'DUE_SOON'
+                ELSE 'OK'
+              END AS rotation_status
+            FROM machine_identities
+            WHERE status = 'active'
+            ORDER BY rotation_due_at ASC;
+          `);
+
+          console.log('\n=== DDL applied successfully ===\n');
+          JSEOF
+
+      - name: Audit DDL
+        if: always()
+        run: echo "AUDIT: job=apply-ddl skip_ddl=${{ inputs.skip_ddl }} dry_run=${{ inputs.dry_run }} actor=${{ github.actor }} sha=${{ github.sha }} ts=$(date -u +%Y-%m-%dT%H:%M:%SZ) result=${{ job.status }}"
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Generate secrets, upsert to Supabase, push to CF Workers
+  # ---------------------------------------------------------------------------
   provision-machine-identities:
     name: Provision machine identity secrets (8 services)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: apply-ddl
     env:
       DRY_RUN: ${{ inputs.dry_run || 'false' }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -77,7 +304,7 @@ jobs:
             { keyId: 'mid_auth_prod_001',       serviceName: 'rald-auth-core', workerName: 'rald-auth',          scopes: ['auth:admin','machine:provision','auth:verify'] },
           ];
 
-          // Mirror machine.ts algorithm exactly
+          // Mirror machine.ts exactly: SHA-256(secret:salt), hex-encoded
           function generateSecret() {
             const secret  = randomBytes(32).toString('hex');
             const salt    = randomBytes(16).toString('hex');
@@ -174,9 +401,11 @@ jobs:
 
       - name: Audit
         if: always()
-        run: |
-          echo "AUDIT: job=provision dry_run=${{ inputs.dry_run }} actor=${{ github.actor }} sha=${{ github.sha }} ts=$(date -u +%Y-%m-%dT%H:%M:%SZ) result=${{ steps.provision.outcome }}"
+        run: echo "AUDIT: job=provision dry_run=${{ inputs.dry_run }} actor=${{ github.actor }} sha=${{ github.sha }} ts=$(date -u +%Y-%m-%dT%H:%M:%SZ) result=${{ steps.provision.outcome }}"
 
+  # ---------------------------------------------------------------------------
+  # Job 3: Activate scheduled cron triggers via Cloudflare API
+  # ---------------------------------------------------------------------------
   activate-crons:
     name: Activate CF cron triggers (rald-auth + rald-notify)
     runs-on: ubuntu-latest
@@ -242,5 +471,4 @@ jobs:
 
       - name: Audit
         if: always()
-        run: |
-          echo "AUDIT: job=activate-crons dry_run=${{ inputs.dry_run }} actor=${{ github.actor }} sha=${{ github.sha }} ts=$(date -u +%Y-%m-%dT%H:%M:%SZ) result=${{ job.status }}"
+        run: echo "AUDIT: job=activate-crons dry_run=${{ inputs.dry_run }} actor=${{ github.actor }} sha=${{ github.sha }} ts=$(date -u +%Y-%m-%dT%H:%M:%SZ) result=${{ job.status }}"
