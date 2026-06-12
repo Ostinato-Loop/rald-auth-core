@@ -82,6 +82,7 @@ const STATIC_ORIGINS = new Set([
   "https://silicon.rald.cloud",
   "https://loop.rald.cloud",
   "https://messenger.rald.cloud",
+  "https://chat.rald.cloud",
   "https://inbox.rald.cloud",
   "https://pay.rald.cloud",
   "https://payrald.rald.cloud",
