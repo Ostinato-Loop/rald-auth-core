@@ -195,18 +195,32 @@ jobs:
           fi
 
       # ── Phase 1: Machine Identity + Admin alerting secrets ─────────────────
-      - name: Push MACHINE_IDENTITY_SECRET to worker
+      - name: Push MACHINE_KEY_ID to worker
         continue-on-error: true
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          MACHINE_IDENTITY_SECRET: ${{ secrets.MACHINE_IDENTITY_SECRET_AUTH }}
+          MACHINE_KEY_ID: ${{ secrets.MACHINE_KEY_ID }}
         run: |
-          if [ -n "$MACHINE_IDENTITY_SECRET" ]; then
-            echo "$MACHINE_IDENTITY_SECRET" | npx wrangler secret put MACHINE_IDENTITY_SECRET --name rald-auth
-            echo "MACHINE_IDENTITY_SECRET pushed to rald-auth (C-CERT-001 resolved)"
+          if [ -n "$MACHINE_KEY_ID" ]; then
+            echo "$MACHINE_KEY_ID" | npx wrangler secret put MACHINE_KEY_ID --name rald-auth
+            echo "MACHINE_KEY_ID ✓"
           else
-            echo "WARNING: MACHINE_IDENTITY_SECRET_AUTH not set — run scripts/provision-machine-identities.sh first"
+            echo "WARNING: MACHINE_KEY_ID not set in org secrets — machine auth token exchange will fail"
+          fi
+
+      - name: Push MACHINE_KEY_SECRET to worker
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          MACHINE_KEY_SECRET: ${{ secrets.MACHINE_KEY_SECRET }}
+        run: |
+          if [ -n "$MACHINE_KEY_SECRET" ]; then
+            echo "$MACHINE_KEY_SECRET" | npx wrangler secret put MACHINE_KEY_SECRET --name rald-auth
+            echo "MACHINE_KEY_SECRET ✓"
+          else
+            echo "WARNING: MACHINE_KEY_SECRET not set in org secrets — machine auth token exchange will fail"
           fi
 
       - name: Push ADMIN_USER_ID to worker

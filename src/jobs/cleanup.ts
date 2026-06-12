@@ -17,7 +17,7 @@ async function getMachineToken(env: Bindings): Promise<string | null> {
   const keyId     = (env as Record<string, unknown>).MACHINE_KEY_ID     as string | undefined;
   const keySecret = (env as Record<string, unknown>).MACHINE_KEY_SECRET as string | undefined;
   if (!keyId || !keySecret) {
-    console.warn(\`\${LOG_TAG} MACHINE_KEY_ID / MACHINE_KEY_SECRET not configured — cannot send notifications\`);
+    console.warn(`${LOG_TAG} MACHINE_KEY_ID / MACHINE_KEY_SECRET not configured — cannot send notifications`);
     return null;
   }
   const now = Math.floor(Date.now() / 1000);
@@ -32,7 +32,7 @@ async function getMachineToken(env: Bindings): Promise<string | null> {
       signal:  AbortSignal.timeout(10_000),
     });
     if (!resp.ok) {
-      console.warn(\`\${LOG_TAG} Machine auth exchange failed: HTTP \${resp.status}\`);
+      console.warn(`${LOG_TAG} Machine auth exchange failed: HTTP ${resp.status}`);
       return null;
     }
     const data = await resp.json() as { token?: string; expires_in?: number };
@@ -40,7 +40,7 @@ async function getMachineToken(env: Bindings): Promise<string | null> {
     _machineTokenCache = { token: data.token, expiresAt: now + (data.expires_in ?? 3600) };
     return data.token;
   } catch (e) {
-    console.warn(\`\${LOG_TAG} Machine auth exchange error:\`, String(e));
+    console.warn(`${LOG_TAG} Machine auth exchange error:`, String(e));
     return null;
   }
 }
@@ -192,12 +192,12 @@ async function sendRotationAlert(
       method: "POST",
       headers: {
         "Content-Type":  "application/json",
-        "Authorization": `Bearer \${machineToken}`,
+        "Authorization": `Bearer ${machineToken}`,
       },
       body: JSON.stringify({
         user_id:  adminUserId,
         type:     "machine_token_rotation",
-        title:    `⚠️ \${alerts.length} machine token(s) due for rotation`,
+        title:    `⚠️ ${alerts.length} machine token(s) due for rotation`,
         body:     bodyText,
         channel:  "email",
         metadata: { alerts },
@@ -251,13 +251,13 @@ export async function runHealthSnapshot(env: Bindings): Promise<void> {
         method: "POST",
         headers: {
           "Content-Type":  "application/json",
-          "Authorization": `Bearer \${machineToken}`,
+          "Authorization": `Bearer ${machineToken}`,
         },
         body: JSON.stringify({
           user_id:  adminUserId,
           type:     "service_health_alert",
-          title:    `🔴 \${unhealthy.length} service(s) unhealthy`,
-          body:     unhealthy.map((s) => `• \${s.name}: HTTP \${s.status}`).join("\n"),
+          title:    `🔴 ${unhealthy.length} service(s) unhealthy`,
+          body:     unhealthy.map((s) => `• ${s.name}: HTTP ${s.status}`).join("\n"),
           channel:  "push",
         }),
         signal: AbortSignal.timeout(10_000),
