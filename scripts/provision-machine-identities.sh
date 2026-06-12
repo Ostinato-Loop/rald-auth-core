@@ -1,37 +1,36 @@
 #!/usr/bin/env bash
 # =============================================================================
 # RALD — Machine Identity Provisioning Script
-# Phase 1 — Public Beta Blocker C-CERT-001
+# Sprint: Public Beta Hardening · C-CERT-001
+# Updated: 2026-06-15 — aligned with seed migration 20260615000000
 # =============================================================================
 #
 # PURPOSE:
-#   Provisions a machine identity for each RALD service at auth.rald.cloud.
-#   Each identity gets a unique key_id + secret that the service uses to
-#   exchange for a scoped 1-hour JWT via POST /machine/auth.
+#   After running migration 20260615000000_machine_identity_seed.sql,
+#   call POST /machine/identities/rotate for each seeded service to replace
+#   the placeholder secret_hash with a real cryptographic secret.
+#   Outputs `wrangler secret put` commands for each affected worker.
 #
 # PREREQUISITES:
-#   1. You must have an admin RALD JWT. Get one:
-#      curl -X POST https://auth.rald.cloud/auth/login \
-#        -d '{"phone":"YOUR_ADMIN_PHONE","password":"YOUR_ADMIN_PASSWORD"}'
-#      Then: export RALD_ADMIN_JWT="<token from response>"
+#   1. Migration 20260615000000_machine_identity_seed.sql applied to prod DB.
+#   2. Admin RALD JWT — obtain via:
+#        curl -X POST https://auth.rald.cloud/auth/login \
+#          -H 'Content-Type: application/json' \
+#          -d '{"phone":"ADMIN_PHONE","password":"ADMIN_PASSWORD"}'
+#      Then: export RALD_ADMIN_JWT="eyJ..."
+#   3. wrangler CLI available in PATH.
 #
-#   2. Set your admin JWT:
-#      export RALD_ADMIN_JWT="eyJ..."
+# USAGE:
+#   export RALD_ADMIN_JWT="eyJ..."
+#   bash scripts/provision-machine-identities.sh
 #
-#   3. Run this script:
-#      bash scripts/provision-machine-identities.sh
+# ROTATION (every 90 days):
+#   Re-run this script — it calls /rotate which re-issues the secret.
+#   Then re-push the new secret to each worker via wrangler.
 #
-# OUTPUT:
-#   This script outputs wrangler secret put commands for each service.
-#   You MUST run those commands in each service's repo directory.
-#   The secret is shown ONCE and cannot be retrieved again.
-#
-# ROTATION:
-#   Machine identities auto-rotate every 90 days. You will receive an
-#   email alert 7 days before rotation is due. When rotating:
-#     curl -X POST https://auth.rald.cloud/machine/identities/<id>/rotate \
-#       -H "Authorization: Bearer $RALD_ADMIN_JWT"
-#   Then re-run the wrangler secret put command with the new secret.
+# SECURITY:
+#   Output contains live secrets. Do NOT commit output to Git.
+#   Store secrets in a password manager, then push via wrangler secret put.
 # =============================================================================
 
 set -euo pipefail
@@ -41,115 +40,126 @@ ADMIN_JWT="${RALD_ADMIN_JWT:-}"
 
 if [ -z "$ADMIN_JWT" ]; then
   echo "ERROR: RALD_ADMIN_JWT is not set."
-  echo "  Get your admin JWT:"
-  echo "  curl -X POST $AUTH_URL/auth/login -d '{\"phone\":\"YOUR_PHONE\",\"password\":\"YOUR_PASSWORD\"}'"
-  echo "  Then: export RALD_ADMIN_JWT=<token>"
+  echo "  export RALD_ADMIN_JWT=\$(curl -s -X POST $AUTH_URL/auth/login \\"
+  echo "    -H 'Content-Type: application/json' \\"
+  echo "    -d '{\"phone\":\"YOUR_PHONE\",\"password\":\"YOUR_PASS\"}' | jq -r .access_token)"
   exit 1
 fi
 
-echo "============================================================"
+echo "=================================================================="
 echo "  RALD Machine Identity Provisioning"
-echo "  Phase 1 — C-CERT-001"
-echo "  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-echo "============================================================"
+echo "  C-CERT-001 · $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "=================================================================="
 echo ""
 
-# Service definitions: name | display | scopes (comma-separated) | allowed services
-SERVICES=(
-  "loop|Loop API Worker|notify:publish,search:index,inbox:write,realtime:coordinate|messenger,notify,search,inbox,realtime"
-  "messenger|Loop Messenger API|notify:publish,search:index,inbox:write|loop,notify,search,inbox"
-  "rald-notify|RALD Notify Service|notify:internal|auth,loop,messenger,inbox"
-  "rald-search|RALD Search Service|search:internal|auth,loop,messenger"
-  "rald-inbox|RALD Inbox Service|inbox:internal,notify:publish|auth,loop,messenger,notify"
-  "rald-realtime|RALD Realtime Service|realtime:internal,notify:publish|auth,loop"
-  "rald-event-bus|RALD Event Bus|events:publish,events:subscribe|auth,loop,messenger,notify,search,inbox,realtime"
+# key_id values seeded by 20260615000000_machine_identity_seed.sql
+# Maps key_id → the repo directory name for wrangler context
+declare -A KEY_TO_REPO=(
+  ["mid_loop_api_prod_001"]="loop"
+  ["mid_messenger_prod_001"]="messenger"
+  ["mid_event_bus_prod_001"]="rald-event-bus"
+  ["mid_config_prod_001"]="rald-config"
+  ["mid_search_prod_001"]="rald-search"
+  ["mid_notify_prod_001"]="rald-notify"
+  ["mid_realtime_prod_001"]="rald-realtime"
+  ["mid_auth_prod_001"]="rald-auth-core"
 )
 
-echo "Provisioning ${#SERVICES[@]} machine identities..."
-echo ""
+declare -a WRANGLER_COMMANDS=()
+FAIL_COUNT=0
 
-# Store secrets for operator output
-declare -a WRANGLER_COMMANDS
+for KEY_ID in "${!KEY_TO_REPO[@]}"; do
+  REPO="${KEY_TO_REPO[$KEY_ID]}"
+  echo "  Rotating: $KEY_ID (repo: $REPO) ..."
 
-for svc_def in "${SERVICES[@]}"; do
-  IFS='|' read -r service_name display_name scopes_csv allowed_csv <<< "$svc_def"
-
-  # Build scopes JSON array
-  scopes_json=$(echo "$scopes_csv" | tr ',' '\n' | sed 's/^/"/;s/$/"/' | tr '\n' ',' | sed 's/,$//' | sed 's/^/[/;s/$/]/')
-  allowed_json=$(echo "$allowed_csv" | tr ',' '\n' | sed 's/^/"/;s/$/"/' | tr '\n' ',' | sed 's/,$//' | sed 's/^/[/;s/$/]/')
-
-  echo "  Provisioning: $service_name ($display_name)..."
-
-  response=$(curl -s -X POST "$AUTH_URL/machine/identities" \
+  RESPONSE=$(curl -s -X POST "$AUTH_URL/machine/identities/rotate" \
     -H "Authorization: Bearer $ADMIN_JWT" \
     -H "Content-Type: application/json" \
-    -d "{
-      \"service_name\": \"$service_name\",
-      \"display_name\": \"$display_name\",
-      \"description\": \"Machine identity for $display_name — provisioned by Phase 1 script\",
-      \"scopes\": $scopes_json,
-      \"allowed_services\": $allowed_json,
-      \"environment\": \"production\"
-    }")
+    -d "{\"key_id\": \"$KEY_ID\"}" \
+  )
 
-  # Parse response
-  ok=$(echo "$response" | node -e "const d=[];process.stdin.on('data',c=>d.push(c));process.stdin.on('end',()=>{const r=JSON.parse(d.join(''));console.log(r.id ? 'ok' : 'error')})" 2>/dev/null || echo "error")
-
-  if [ "$ok" = "ok" ]; then
-    secret=$(echo "$response" | node -e "const d=[];process.stdin.on('data',c=>d.push(c));process.stdin.on('end',()=>{const r=JSON.parse(d.join(''));console.log(r.secret||'')})") 
-    id=$(echo "$response" | node -e "const d=[];process.stdin.on('data',c=>d.push(c));process.stdin.on('end',()=>{const r=JSON.parse(d.join(''));console.log(r.id||'')})")
-    rotation=$(echo "$response" | node -e "const d=[];process.stdin.on('data',c=>d.push(c));process.stdin.on('end',()=>{const r=JSON.parse(d.join(''));console.log(r.rotation_due_at||'')})")
-    echo "    ✅ Provisioned: $service_name (ID: $id, rotation due: $rotation)"
-    WRANGLER_COMMANDS+=("$service_name|$secret")
+  # Portable JSON extraction via node (available in all CF/Node environments)
+  if command -v node &>/dev/null; then
+    SECRET=$(echo "$RESPONSE" | node -e "
+      let d=''; process.stdin.on('data',c=>d+=c).on('end',()=>{
+        try { const r=JSON.parse(d); process.stdout.write(r.secret||''); }
+        catch { process.stdout.write(''); }
+      })")
+    ERR=$(echo "$RESPONSE" | node -e "
+      let d=''; process.stdin.on('data',c=>d+=c).on('end',()=>{
+        try { const r=JSON.parse(d); process.stdout.write(r.error||''); }
+        catch { process.stdout.write('parse_error'); }
+      })")
+  elif command -v python3 &>/dev/null; then
+    SECRET=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('secret',''),end='')" 2>/dev/null || true)
+    ERR=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error',''),end='')" 2>/dev/null || true)
   else
-    echo "    ❌ Failed: $service_name"
-    echo "    Response: $response"
-    echo ""
-    echo "  If you got 409 Conflict, this identity already exists."
-    echo "  To rotate it, run:"
-    echo "    curl -X POST $AUTH_URL/machine/identities/<id>/rotate -H 'Authorization: Bearer \$RALD_ADMIN_JWT'"
+    echo "    ERROR: neither node nor python3 available for JSON parsing"
+    echo "    Raw response: $RESPONSE"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    continue
   fi
 
-  # Small delay to avoid rate limiting
-  sleep 0.5
+  if [ -n "$ERR" ]; then
+    echo "    ❌ FAILED: $ERR"
+    echo "    Raw: $RESPONSE"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  elif [ -z "$SECRET" ]; then
+    echo "    ❌ FAILED: empty secret in response"
+    echo "    Raw: $RESPONSE"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  else
+    echo "    ✅ Rotated: $KEY_ID → secret ready"
+    WRANGLER_COMMANDS+=("$KEY_ID|$REPO|$SECRET")
+  fi
+
+  sleep 0.3
 done
 
 echo ""
-echo "============================================================"
-echo "  SECRETS — RUN THESE IN EACH SERVICE REPO DIRECTORY"
-echo "  (secrets shown ONCE — store in a password manager!)"
-echo "============================================================"
+echo "=================================================================="
+echo "  SECRETS — COPY AND RUN IN EACH REPO DIRECTORY"
+echo "  These are live credentials. Treat as passwords."
+echo "=================================================================="
 echo ""
 
-for entry in "${WRANGLER_COMMANDS[@]}"; do
-  IFS='|' read -r svc_name secret <<< "$entry"
-  echo "# $svc_name"
-  echo "# Run this in the ${svc_name} repo directory:"
-  echo "echo '${secret}' | npx wrangler secret put MACHINE_IDENTITY_SECRET --name ${svc_name//-/_}"
+for ENTRY in "${WRANGLER_COMMANDS[@]}"; do
+  IFS='|' read -r KEY_ID REPO SECRET <<< "$ENTRY"
+  echo "# ── $REPO ────────────────────────────────────────"
+  echo "# cd /path/to/$REPO"
+  echo "printf '%s' '$KEY_ID'  | wrangler secret put MACHINE_KEY_ID"
+  echo "printf '%s' '$SECRET' | wrangler secret put MACHINE_KEY_SECRET"
   echo ""
 done
 
-echo "============================================================"
-echo "  ALSO ADD THESE ORG SECRETS TO GITHUB"
-echo "  (Settings → Secrets → Actions → New organization secret)"
-echo "============================================================"
+echo "=================================================================="
+echo "  GITHUB ACTIONS — add these to each repo's encrypted secrets:"
+echo "    MACHINE_KEY_ID     = <key_id above>"
+echo "    MACHINE_KEY_SECRET = <secret above>"
 echo ""
-echo "  For each service, add to its GitHub repo secrets:"
-echo "  MACHINE_IDENTITY_SECRET = <the secret shown above>"
+echo "  Then in each repo's deploy.yml:"
+echo "    - run: |"
+echo "        printf '%s' \"\${{ secrets.MACHINE_KEY_ID }}\" \\"
+echo "          | wrangler secret put MACHINE_KEY_ID"
+echo "        printf '%s' \"\${{ secrets.MACHINE_KEY_SECRET }}\" \\"
+echo "          | wrangler secret put MACHINE_KEY_SECRET"
+echo "=================================================================="
 echo ""
-echo "  Then update each service's deploy.yml to include:"
-echo '  - run: echo "${{ secrets.MACHINE_IDENTITY_SECRET }}" | npx wrangler secret put MACHINE_IDENTITY_SECRET'
+echo "  VERIFICATION (run per-service after secrets are set):"
+echo "    curl -X POST https://auth.rald.cloud/machine/auth \\"
+echo "      -H 'Content-Type: application/json' \\"
+echo "      -d '{\"key_id\":\"<KEY_ID>\",\"secret\":\"<SECRET>\"}'"
+echo "    Expected: { ok:true, token:'...', scopes:[...] }"
 echo ""
-echo "============================================================"
-echo "  VERIFICATION"
-echo "============================================================"
+echo "=================================================================="
+echo "  NEXT ROTATION DUE: 90 days from today"
+echo "  $(date -u -d '+90 days' +%Y-%m-%d 2>/dev/null || date -u -v+90d +%Y-%m-%d 2>/dev/null || echo '(calculate manually)')"
+echo "=================================================================="
 echo ""
-echo "  After pushing each secret, verify it works:"
-echo ""
-echo "  curl -X POST https://auth.rald.cloud/machine/auth \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{\"key_id\":\"mid_<id>\",\"secret\":\"mid_<id>:<secret>\"}'"
-echo ""
-echo "  Expected: { ok: true, token: '...', service: '...', scopes: [...] }"
-echo ""
+
+if [ "$FAIL_COUNT" -gt 0 ]; then
+  echo "WARNING: $FAIL_COUNT service(s) failed to provision. See errors above."
+  exit 1
+fi
+
 echo "Provisioning complete. $(date -u +%Y-%m-%dT%H:%M:%SZ)"

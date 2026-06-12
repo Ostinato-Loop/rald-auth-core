@@ -35,6 +35,11 @@ enabled = true
 head_sampling_rate = 1
 
 # ── Scheduled Jobs ────────────────────────────────────────────────────────────
-# Crons registered manually via CF Dashboard → Workers & Pages → rald-auth → Triggers
-# (wrangler deploy requires 'Scheduled Tasks:Edit' scope to manage crons via CI)
-# Active: "0 * * * *" (hourly cleanup), "0 0 * * *" (daily cleanup)
+# Crons activate when the API token used for `wrangler deploy` has the
+# `Scheduled Tasks:Edit` permission scope. If the CI token lacks that scope,
+# add the crons manually via CF Dashboard → Workers & Pages → rald-auth → Triggers.
+#
+# "0 * * * *" — every hour: delete expired OTPs + expired sessions
+# "0 0 * * *" — midnight UTC daily: device cleanup + rotation alerts + health snapshot
+[triggers]
+crons = ["0 * * * *", "0 0 * * *"]
