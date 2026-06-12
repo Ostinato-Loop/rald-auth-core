@@ -158,15 +158,24 @@ sso.post("/exchange", authMiddleware, async (c) => {
     }, 400);
   }
 
+  // USN-001: Fetch username to include in SSO token — cross-app username propagation
+  const { data: userRow } = await db
+    .from("auth_users")
+    .select("username")
+    .eq("id", user.id)
+    .limit(1);
+  const raldUsername: string | null = (userRow?.[0]?.username as string | null) ?? null;
+
   const appToken = await signJwt(
     {
-      id:    user.id,
-      email: user.email,
-      phone: (user as unknown as Record<string, unknown>).phone ?? null,
-      role:  user.role,
-      appId: body.appId,
-      source: "rald-auth",
-      sso_v: 2,
+      id:       user.id,
+      email:    user.email,
+      phone:    (user as unknown as Record<string, unknown>).phone ?? null,
+      role:     user.role,
+      username: raldUsername,  // USN-001: cross-app username claim propagation
+      appId:    body.appId,
+      source:   "rald-auth",
+      sso_v:    2,
     },
     c.env.RALD_JWT_SECRET,
     3600
@@ -189,7 +198,9 @@ sso.post("/exchange", authMiddleware, async (c) => {
   c.header("Set-Cookie", buildSessionCookie(appToken, 3600));
   return c.json({
     token: appToken, appId: body.appId, expiresIn: 3600,
-    redirect_to: redirect_to ?? null, sso_version: 2,
+    username:     raldUsername,
+    has_username: !!raldUsername,
+    redirect_to:  redirect_to ?? null, sso_version: 2,
   });
 });
 
@@ -222,8 +233,16 @@ sso.post("/handoff", authMiddleware, async (c) => {
     }, 400);
   }
 
+  // USN-001: Fetch username for handoff token
+  const { data: handoffUserRow } = await db
+    .from("auth_users")
+    .select("username")
+    .eq("id", user.id)
+    .limit(1);
+  const handoffUsername: string | null = (handoffUserRow?.[0]?.username as string | null) ?? null;
+
   const handoffToken = await signJwt(
-    { id: user.id, email: user.email, role: user.role, appId: body.appId, purpose: "sso-handoff" },
+    { id: user.id, email: user.email, role: user.role, username: handoffUsername, appId: body.appId, purpose: "sso-handoff" },
     c.env.RALD_JWT_SECRET,
     300
   );
