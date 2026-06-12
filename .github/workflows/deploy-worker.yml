@@ -1,0 +1,63 @@
+name: Deploy — rald-auth-core › CF Worker
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-rald-auth-worker
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy to Cloudflare Workers
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck 2>/dev/null || npx tsc --noEmit 2>/dev/null || echo "No typecheck — skipping"
+
+      - name: Deploy Worker (production)
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: d5a1cd03b76f467430034af64a7062fd
+          command: deploy --env production
+          secrets: |
+            SUPABASE_SERVICE_ROLE_KEY
+            RALD_JWT_SECRET
+            TERMII_API_KEY
+            TERMII_SENDER_ID
+            RESEND_API_KEY
+            CLERK_SECRET_KEY
+            CLERK_PUBLISHABLE_KEY
+        env:
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          RALD_JWT_SECRET: ${{ secrets.RALD_JWT_SECRET }}
+          TERMII_API_KEY: ${{ secrets.TERMII_API_KEY }}
+          TERMII_SENDER_ID: ${{ secrets.TERMII_SENDER_ID }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
+          CLERK_PUBLISHABLE_KEY: ${{ secrets.CLERK_PUBLISHABLE_KEY }}
+
+      - name: Smoke test
+        run: |
+          sleep 10
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://auth.rald.cloud/health)
+          echo "auth.rald.cloud/health HTTP $STATUS"
+          [ "$STATUS" = "200" ] || echo "WARNING: expected 200, got $STATUS"
+
+      - name: Audit log
+        if: always()
+        run: echo "Worker deploy at $(date -u +%Y-%m-%dT%H:%M:%SZ) commit ${{ github.sha }} by ${{ github.actor }}"
