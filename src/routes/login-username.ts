@@ -4,8 +4,8 @@
 //
 // P4 fix (2026-06-11): returns `needs_username: true` for users without usernames
 //   so the frontend can surface the "Claim your username" flow on next login.
-// P5 fix (2026-06-11): triggers repair_identity_records on successful login
-//   to ensure trust profile and profile rows are always current.
+// P5 fix superseded: repair_identity_records removed from login path (sprint hardening)
+//   Identity repair now runs exclusively via the scheduled cleanup job.
 // LILCKY STUDIO LIMITED
 
 import { Hono } from "hono";
@@ -239,10 +239,6 @@ loginUsername.post("/complete", async (c) => {
   });
 
   c.header("Set-Cookie", buildSessionCookie(token));
-
-  // P5 fix: trigger identity repair on login (non-blocking)
-  db.rpc("repair_identity_records", { p_user_id: user.id })
-    .then(() => null, () => null);
 
   // New-device security notification (non-blocking)
   const notifyEmail = user.email as string | null;

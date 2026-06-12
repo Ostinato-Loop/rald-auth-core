@@ -8,6 +8,43 @@ import type { Bindings } from "../index";
 
 const LOG_TAG = "[rald-auth-cleanup]";
 
+// ── Machine token cache ────────────────────────────────────────────────────
+// rald-auth-core calls POST /machine/auth to get a scoped JWT for service-to-service calls.
+// Token is cached in-memory per isolate lifetime (cold start = re-issue).
+let _machineTokenCache: { token: string; expiresAt: number } | null = null;
+
+async function getMachineToken(env: Bindings): Promise<string | null> {
+  const keyId     = (env as Record<string, unknown>).MACHINE_KEY_ID     as string | undefined;
+  const keySecret = (env as Record<string, unknown>).MACHINE_KEY_SECRET as string | undefined;
+  if (!keyId || !keySecret) {
+    console.warn(\`\${LOG_TAG} MACHINE_KEY_ID / MACHINE_KEY_SECRET not configured — cannot send notifications\`);
+    return null;
+  }
+  const now = Math.floor(Date.now() / 1000);
+  if (_machineTokenCache && _machineTokenCache.expiresAt > now + 60) {
+    return _machineTokenCache.token;
+  }
+  try {
+    const resp = await fetch("https://auth.rald.cloud/machine/auth", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ key_id: keyId, secret: keySecret }),
+      signal:  AbortSignal.timeout(10_000),
+    });
+    if (!resp.ok) {
+      console.warn(\`\${LOG_TAG} Machine auth exchange failed: HTTP \${resp.status}\`);
+      return null;
+    }
+    const data = await resp.json() as { token?: string; expires_in?: number };
+    if (!data.token) return null;
+    _machineTokenCache = { token: data.token, expiresAt: now + (data.expires_in ?? 3600) };
+    return data.token;
+  } catch (e) {
+    console.warn(\`\${LOG_TAG} Machine auth exchange error:\`, String(e));
+    return null;
+  }
+}
+
 interface CleanupStats {
   expired_sessions_deleted: number;
   expired_otps_deleted: number;
@@ -137,21 +174,16 @@ async function sendRotationAlert(
   env: Bindings,
   alerts: Array<{ service_name: string; rotation_due_at: string; days_until_rotation: number }>
 ): Promise<void> {
-  // Only fire if MACHINE_IDENTITY_SECRET is set (avoid circular dependency during bootstrap)
-  const machineSecret = (env as Record<string, unknown>).MACHINE_IDENTITY_SECRET as string | undefined;
-  if (!machineSecret) {
-    console.warn(`${LOG_TAG} MACHINE_IDENTITY_SECRET not set — cannot send rotation alert via notify`);
-    return;
-  }
+  const machineToken = await getMachineToken(env);
+  if (!machineToken) return; // getMachineToken already logs the reason
 
-  // Get admin user ID (set as env var or hardcoded sentinel)
   const adminUserId = (env as Record<string, unknown>).ADMIN_USER_ID as string | undefined;
   if (!adminUserId) {
-    console.warn(`${LOG_TAG} ADMIN_USER_ID not set — logging alert only`);
+    console.warn(`${LOG_TAG} ADMIN_USER_ID not set — logging rotation alert only`);
     return;
   }
 
-  const body_text = alerts
+  const bodyText = alerts
     .map(a => `• ${a.service_name}: ${a.days_until_rotation} days until rotation due`)
     .join("\n");
 
@@ -159,15 +191,15 @@ async function sendRotationAlert(
     await fetch("https://notification.rald.cloud/api/notifications", {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        "X-Machine-Token": machineSecret,
+        "Content-Type":  "application/json",
+        "Authorization": `Bearer \${machineToken}`,
       },
       body: JSON.stringify({
-        user_id: adminUserId,
-        type: "machine_token_rotation",
-        title: `⚠️ ${alerts.length} machine token(s) due for rotation`,
-        body: body_text,
-        channel: "email",
+        user_id:  adminUserId,
+        type:     "machine_token_rotation",
+        title:    `⚠️ \${alerts.length} machine token(s) due for rotation`,
+        body:     bodyText,
+        channel:  "email",
         metadata: { alerts },
       }),
       signal: AbortSignal.timeout(10_000),
@@ -212,18 +244,21 @@ export async function runHealthSnapshot(env: Bindings): Promise<void> {
   if (unhealthy.length > 0) {
     console.error(`${LOG_TAG} UNHEALTHY SERVICES:`, unhealthy.map((s) => s.name).join(", "));
     // Alert admin if machine token available (non-fatal)
-    const machineSecret = (env as Record<string, unknown>).MACHINE_IDENTITY_SECRET as string | undefined;
+    const machineToken = await getMachineToken(env);
     const adminUserId = (env as Record<string, unknown>).ADMIN_USER_ID as string | undefined;
-    if (machineSecret && adminUserId) {
+    if (machineToken && adminUserId) {
       await fetch("https://notification.rald.cloud/api/notifications", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-Machine-Token": machineSecret },
+        headers: {
+          "Content-Type":  "application/json",
+          "Authorization": `Bearer \${machineToken}`,
+        },
         body: JSON.stringify({
-          user_id: adminUserId,
-          type: "service_health_alert",
-          title: `🔴 ${unhealthy.length} service(s) unhealthy`,
-          body: unhealthy.map((s) => `• ${s.name}: HTTP ${s.status}`).join("\n"),
-          channel: "push",
+          user_id:  adminUserId,
+          type:     "service_health_alert",
+          title:    `🔴 \${unhealthy.length} service(s) unhealthy`,
+          body:     unhealthy.map((s) => `• \${s.name}: HTTP \${s.status}`).join("\n"),
+          channel:  "push",
         }),
         signal: AbortSignal.timeout(10_000),
       }).catch(() => {});

@@ -46,6 +46,7 @@ import expansionRoutes          from "./routes/expansion";
 import smartLoginRoute           from "./routes/smart-login";
 import adminUsernameRoutes       from "./routes/admin-username";
 import identityRoutes            from "./routes/identity";
+import identityBrainRoutes        from "./routes/identity-brain";
 import developerRoutes          from "./routes/developer";
 import machineRoutes            from "./routes/machine";
 import trustRoutes              from "./routes/trust";
@@ -288,6 +289,7 @@ app.route("/admin/expansion",        expansionRoutes);
 app.route("/migration",              migrationRoutes);
 app.route("/country",                countryRoutes);
 app.route("/identity",               identityRoutes);
+app.route("/identity-brain",         identityBrainRoutes); // manifest + capabilities at /identity-brain/ and /identity-brain/health
 app.route("/identity-brain",         identityRoutes);   // Phase 1: canonical Identity Brain namespace (aliases /identity/*)
 app.route("/developer",              developerRoutes);
 app.route("/machine",                machineRoutes);

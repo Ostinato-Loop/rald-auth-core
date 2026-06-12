@@ -426,10 +426,6 @@ smartLogin.post("/complete", async (c) => {
 
   c.header("Set-Cookie", buildSessionCookie(token));
 
-  // Identity repair (non-blocking)
-  db.rpc("repair_identity_records", { p_user_id: user.id })
-    .then(() => null, () => null);
-
   const needsUsername = !(user.username as string | null);
   if (needsUsername) {
     await db.from("username_migration_queue").upsert(
