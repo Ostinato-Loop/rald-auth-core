@@ -6,12 +6,12 @@
 //           SUPABASE_SERVICE_ROLE_KEY (PostgREST DML operations)
 //           SUPABASE_URL (project URL)
 
-import { readFileSync, readdirSync, existsSync } from "fs";
-import { join } from "path";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { join } from "node:path";
 
 const SUPABASE_URL   = process.env.SUPABASE_URL   || "https://onxdcikfttdmnhofsuwo.supabase.co";
 const SERVICE_KEY    = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const ACCESS_TOKEN   = process.env.SUPABASE_ACCESS_TOKEN;  // sbp_xxx management token
+const ACCESS_TOKEN   = process.env.SUPABASE_ACCESS_TOKEN;
 const DRY_RUN        = process.env.DRY_RUN === "true";
 const PROJECT_REF    = "onxdcikfttdmnhofsuwo";
 const MGMT_BASE      = "https://api.supabase.com";
@@ -33,12 +33,6 @@ if (DRY_RUN) { console.log("DRY RUN: skipping all changes."); process.exit(0); }
 
 // ── 2. Apply DDL migrations via Management API ────────────────────────
 const MIGRATIONS_DIR = "supabase/migrations";
-const APPLIED_MARKER = "/tmp/rald-applied-migrations.json";
-
-let appliedSet = new Set();
-if (existsSync(APPLIED_MARKER)) {
-  try { appliedSet = new Set(JSON.parse(readFileSync(APPLIED_MARKER, "utf8"))); } catch {}
-}
 
 if (!ACCESS_TOKEN) {
   console.warn("WARNING: SUPABASE_ACCESS_TOKEN not set — skipping DDL migrations.");
@@ -50,7 +44,6 @@ if (!ACCESS_TOKEN) {
     "Content-Type": "application/json",
   };
 
-  // Apply all migration files in lexicographic (timestamp) order
   let migrationFiles = [];
   if (existsSync(MIGRATIONS_DIR)) {
     migrationFiles = readdirSync(MIGRATIONS_DIR)
@@ -61,10 +54,6 @@ if (!ACCESS_TOKEN) {
   console.log(`\n=== Applying DDL migrations (${migrationFiles.length} files) ===`);
 
   for (const file of migrationFiles) {
-    if (appliedSet.has(file)) {
-      console.log(`  [SKIP already-applied] ${file}`);
-      continue;
-    }
     const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf8");
     const res = await fetch(`${MGMT_BASE}/v1/projects/${PROJECT_REF}/database/query`, {
       method: "POST",
@@ -73,18 +62,15 @@ if (!ACCESS_TOKEN) {
     });
     const body = await res.json().catch(() => ({ error: "non-JSON response" }));
     if (!res.ok) {
-      // Some errors are acceptable (e.g. column already exists, table exists)
       const msg = JSON.stringify(body);
       const isIdempotentError = msg.includes("already exists") || msg.includes("does not exist");
       if (isIdempotentError) {
         console.log(`  [WARN idempotent] ${file}: ${msg.slice(0, 120)}`);
       } else {
         console.error(`  [FAIL] ${file}: HTTP ${res.status} — ${msg.slice(0, 200)}`);
-        // Don't exit — try remaining migrations
       }
     } else {
       console.log(`  [OK] ${file}`);
-      appliedSet.add(file);
     }
   }
 }
@@ -92,10 +78,9 @@ if (!ACCESS_TOKEN) {
 // ── 3. DML seeding (country_registry — idempotent) ──────────────────
 console.log("\n=== DML seeding ===");
 
-// Check if country_registry table exists first
 const tableCheck = await fetch(SUPABASE_URL + "/rest/v1/country_registry?limit=0", { headers: restH });
 if (!tableCheck.ok) {
-  console.warn("country_registry table not found — DDL migration not yet applied or failed. Skipping seed.");
+  console.warn("country_registry table not found — DDL migration not yet applied. Skipping seed.");
 } else {
   const PREF_H = { ...restH, "Prefer": "resolution=ignore-duplicates,return=minimal" };
   const seed = await fetch(SUPABASE_URL + "/rest/v1/country_registry", {
