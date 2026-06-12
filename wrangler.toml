@@ -34,11 +34,7 @@ command = ""
 enabled = true
 head_sampling_rate = 1
 
-# ── Scheduled Jobs (Phase 1 — Self-Healing Ops) ────────────────────────────
-# NOTE: If this wrangler token lacks 'Scheduled Tasks:Edit' scope, add the
-# cron manually via CF Dashboard → Workers & Pages → rald-auth → Triggers.
-[triggers]
-crons = [
-  "0 * * * *",  # Hourly: OTP cleanup + expired session deletion
-  "0 0 * * *"   # Daily: device cleanup + rotation alerts + health snapshot
-]
+# ── Scheduled Jobs ────────────────────────────────────────────────────────────
+# Crons registered manually via CF Dashboard → Workers & Pages → rald-auth → Triggers
+# (wrangler deploy requires 'Scheduled Tasks:Edit' scope to manage crons via CI)
+# Active: "0 * * * *" (hourly cleanup), "0 0 * * *" (daily cleanup)
