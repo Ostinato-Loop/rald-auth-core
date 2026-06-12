@@ -1,31 +1,10 @@
 name: Provision Machine Identities + Activate Crons
 
-# Generates cryptographic machine identity secrets for all 8 RALD services,
-# upserts them into Supabase (matching on service_name), pushes MACHINE_KEY_ID
-# + MACHINE_KEY_SECRET to each Cloudflare Worker via wrangler, and activates
-# scheduled cron triggers for rald-auth and rald-notify via the CF API.
-#
-# Algorithm mirrors machine.ts exactly:
-#   secret  = 32 random bytes → hex (64 chars)
-#   salt    = 16 random bytes → hex (32 chars)
-#   key_hash = SHA-256(secret + ":" + salt) → hex
-#   MACHINE_KEY_SECRET delivered to worker = "key_id:secret"
-#
-# Required GitHub secrets (org-level):
-#   CLOUDFLARE_API_TOKEN    — Workers:Edit + Scheduled Tasks:Edit
-#   CLOUDFLARE_ACCOUNT_ID
-#   SUPABASE_URL            (or uses hardcoded fallback)
-#   SUPABASE_SERVICE_ROLE_KEY
-#
-# Trigger: manual only (workflow_dispatch) or via GitHub API dispatch.
-# Sprint: Public Beta Hardening · C-CERT-001 · 2026-06-15
-# LILCKY STUDIO LIMITED
-
 on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Dry run — generate secrets but skip Supabase + wrangler writes"
+        description: "Dry run - generate secrets but skip Supabase + wrangler writes"
         type: boolean
         default: false
 
@@ -33,10 +12,27 @@ concurrency:
   group: provision-machine-identities
   cancel-in-progress: false
 
+# Generates cryptographic machine identity secrets for all 8 RALD services,
+# upserts them into Supabase (matching on service_name), pushes MACHINE_KEY_ID
+# + MACHINE_KEY_SECRET to each CF Worker via wrangler, and activates scheduled
+# cron triggers for rald-auth and rald-notify via the CF REST API.
+#
+# Algorithm mirrors machine.ts exactly:
+#   secret   = 32 random bytes -> hex (64 chars)
+#   salt     = 16 random bytes -> hex (32 chars)
+#   key_hash = SHA-256(secret + ":" + salt) -> hex
+#   MACHINE_KEY_SECRET delivered to worker = "key_id:secret"
+#
+# Required GitHub org secrets:
+#   CLOUDFLARE_API_TOKEN      Workers:Edit + Scheduled Tasks:Edit
+#   CLOUDFLARE_ACCOUNT_ID
+#   SUPABASE_SERVICE_ROLE_KEY
+#   SUPABASE_URL              (fallback hardcoded below)
+#
+# Sprint: Public Beta Hardening - C-CERT-001 - 2026-06-15
+# LILCKY STUDIO LIMITED
+
 jobs:
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Job 1: Generate secrets, upsert to Supabase, push to CF Workers
-  # ─────────────────────────────────────────────────────────────────────────────
   provision-machine-identities:
     name: Provision machine identity secrets (8 services)
     runs-on: ubuntu-latest
@@ -56,7 +52,7 @@ jobs:
           node-version: "22"
 
       - name: Install wrangler
-        run: npm install wrangler --no-save --prefer-offline 2>/dev/null || npm install wrangler --no-save
+        run: npm install wrangler --no-save 2>/dev/null || npm install wrangler --no-save
 
       - name: Generate + provision machine identity secrets
         id: provision
@@ -65,11 +61,11 @@ jobs:
           const { createHash, randomBytes } = require('crypto');
           const { execSync } = require('child_process');
 
-          const DRY_RUN = process.env.DRY_RUN === 'true';
+          const DRY_RUN     = process.env.DRY_RUN === 'true';
           const SUPABASE_URL = process.env.SUPABASE_URL;
           const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-          // Service map: key_id matches seed migration 20260615000000_machine_identity_seed.sql
+          // key_id values match seed migration 20260615000000_machine_identity_seed.sql
           const services = [
             { keyId: 'mid_loop_api_prod_001',   serviceName: 'loop',           workerName: 'loop-api',           scopes: ['messages:read','messages:write','auth:verify','notifications:send'] },
             { keyId: 'mid_messenger_prod_001',  serviceName: 'messenger',      workerName: 'loop-messenger-api', scopes: ['messages:read','messages:write','auth:verify','notifications:send'] },
@@ -83,114 +79,104 @@ jobs:
 
           // Mirror machine.ts algorithm exactly
           function generateSecret() {
-            const secret  = randomBytes(32).toString('hex'); // 64 hex chars
-            const salt    = randomBytes(16).toString('hex'); // 32 hex chars
-            const keyHash = createHash('sha256').update(`${secret}:${salt}`).digest('hex');
+            const secret  = randomBytes(32).toString('hex');
+            const salt    = randomBytes(16).toString('hex');
+            const keyHash = createHash('sha256').update(secret + ':' + salt).digest('hex');
             return { secret, salt, keyHash };
           }
 
           async function upsertToSupabase(svc, secret, salt, keyHash) {
             if (!SUPABASE_KEY) throw new Error('SUPABASE_SERVICE_ROLE_KEY not set');
             const rotationDue = new Date(Date.now() + 86400 * 90 * 1000).toISOString();
-            const body = JSON.stringify({
+            const payload = [{
               key_id:          svc.keyId,
               key_hash:        keyHash,
               key_salt:        salt,
               status:          'active',
+              scopes:          svc.scopes,
               last_rotated_at: new Date().toISOString(),
               rotation_due_at: rotationDue,
-              scopes:          svc.scopes,
-            });
-            const res = await fetch(`${SUPABASE_URL}/rest/v1/machine_identities?on_conflict=service_name`, {
-              method:  'POST',
-              headers: {
-                'apikey':        SUPABASE_KEY,
-                'Authorization': `Bearer ${SUPABASE_KEY}`,
-                'Content-Type':  'application/json',
-                'Prefer':        'resolution=merge-duplicates,return=minimal',
-              },
-              body: `[${body}]`,
-            });
+            }];
+            const res = await fetch(
+              SUPABASE_URL + '/rest/v1/machine_identities?on_conflict=service_name',
+              {
+                method: 'POST',
+                headers: {
+                  'apikey':        SUPABASE_KEY,
+                  'Authorization': 'Bearer ' + SUPABASE_KEY,
+                  'Content-Type':  'application/json',
+                  'Prefer':        'resolution=merge-duplicates,return=minimal',
+                },
+                body: JSON.stringify(payload),
+              }
+            );
             if (!res.ok) {
               const txt = await res.text();
-              throw new Error(`Supabase upsert failed (${res.status}): ${txt}`);
+              throw new Error('Supabase upsert failed (' + res.status + '): ' + txt);
             }
           }
 
           function pushToWorker(workerName, keyId, secretFull) {
-            execSync(
-              `printf '%s' '${keyId}' | npx wrangler secret put MACHINE_KEY_ID --name '${workerName}'`,
-              { stdio: 'inherit', env: { ...process.env } }
-            );
-            execSync(
-              `printf '%s' '${secretFull}' | npx wrangler secret put MACHINE_KEY_SECRET --name '${workerName}'`,
-              { stdio: 'inherit', env: { ...process.env } }
-            );
+            execSync("printf '%s' '" + keyId + "' | npx wrangler secret put MACHINE_KEY_ID --name '" + workerName + "'",
+              { stdio: 'inherit' });
+            execSync("printf '%s' '" + secretFull + "' | npx wrangler secret put MACHINE_KEY_SECRET --name '" + workerName + "'",
+              { stdio: 'inherit' });
           }
 
           (async () => {
-            console.log(`\n${'='.repeat(66)}`);
-            console.log(`  RALD Machine Identity Provisioning — ${new Date().toISOString()}`);
-            console.log(`  DRY_RUN=${DRY_RUN}`);
+            console.log('\n' + '='.repeat(66));
+            console.log('  RALD Machine Identity Provisioning - ' + new Date().toISOString());
+            console.log('  DRY_RUN=' + DRY_RUN);
             console.log('='.repeat(66) + '\n');
 
-            let successCount = 0;
-            let failCount    = 0;
+            let ok = 0, fail = 0;
 
             for (const svc of services) {
-              console.log(`\n── ${svc.serviceName} (${svc.keyId}) ──`);
+              console.log('\n-- ' + svc.serviceName + ' (' + svc.keyId + ') --');
               const { secret, salt, keyHash } = generateSecret();
-              const machineSecret = `${svc.keyId}:${secret}`;
+              const machineSecret = svc.keyId + ':' + secret;
 
               if (DRY_RUN) {
-                console.log(`  [DRY RUN] Generated: key_id=${svc.keyId} hash=${keyHash.slice(0,16)}...`);
-                successCount++;
+                console.log('  [DRY RUN] hash=' + keyHash.slice(0, 16) + '...');
+                ok++;
                 continue;
               }
 
-              // 1. Upsert to Supabase
               try {
                 await upsertToSupabase(svc, secret, salt, keyHash);
-                console.log(`  ✅ Supabase: ${svc.serviceName} upserted`);
+                console.log('  OK Supabase upserted');
               } catch (err) {
-                console.error(`  ❌ Supabase FAILED for ${svc.serviceName}: ${err.message}`);
-                failCount++;
+                console.error('  FAIL Supabase: ' + err.message);
+                fail++;
                 continue;
               }
 
-              // 2. Push to CF Worker
               try {
                 pushToWorker(svc.workerName, svc.keyId, machineSecret);
-                console.log(`  ✅ Wrangler: MACHINE_KEY_ID + MACHINE_KEY_SECRET pushed to '${svc.workerName}'`);
-                successCount++;
+                console.log('  OK wrangler: MACHINE_KEY_ID + MACHINE_KEY_SECRET -> ' + svc.workerName);
+                ok++;
               } catch (err) {
-                console.error(`  ❌ Wrangler FAILED for ${svc.workerName}: ${err.message}`);
-                failCount++;
+                console.error('  FAIL wrangler (' + svc.workerName + '): ' + err.message);
+                fail++;
               }
 
-              // Brief pause to avoid CF rate limits
               await new Promise(r => setTimeout(r, 400));
             }
 
             console.log('\n' + '='.repeat(66));
-            console.log(`  RESULT: ${successCount}/8 services provisioned, ${failCount} failed`);
-            console.log(`  Rotation due: ${new Date(Date.now() + 86400 * 90 * 1000).toISOString().slice(0,10)} (90 days)`);
+            console.log('  RESULT: ' + ok + '/8 provisioned, ' + fail + ' failed');
+            console.log('  Next rotation: ' + new Date(Date.now() + 86400 * 90 * 1000).toISOString().slice(0, 10));
             console.log('='.repeat(66) + '\n');
 
-            if (failCount > 0) {
-              console.error(`WARN: ${failCount} service(s) failed. Review errors above.`);
-              process.exit(1);
-            }
+            if (fail > 0) process.exit(1);
           })();
           JSEOF
 
-      - name: Audit record
+      - name: Audit
         if: always()
-        run: echo "AUDIT: job=provision-machine-identities dry_run=${{ inputs.dry_run }} actor=${{ github.actor }} sha=${{ github.sha }} ts=$(date -u +%Y-%m-%dT%H:%M:%SZ) result=${{ steps.provision.outcome }}"
+        run: |
+          echo "AUDIT: job=provision dry_run=${{ inputs.dry_run }} actor=${{ github.actor }} sha=${{ github.sha }} ts=$(date -u +%Y-%m-%dT%H:%M:%SZ) result=${{ steps.provision.outcome }}"
 
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Job 2: Activate scheduled cron triggers via Cloudflare API
-  # ─────────────────────────────────────────────────────────────────────────────
   activate-crons:
     name: Activate CF cron triggers (rald-auth + rald-notify)
     runs-on: ubuntu-latest
@@ -214,24 +200,16 @@ jobs:
           }
 
           const workers = [
-            {
-              name:  'rald-auth',
-              crons: ['0 * * * *', '0 0 * * *'],
-              note:  'hourly OTP+session cleanup / midnight device cleanup + rotation alerts',
-            },
-            {
-              name:  'rald-notify',
-              crons: ['*/5 * * * *'],
-              note:  'every 5 min notification dispatch',
-            },
+            { name: 'rald-auth',   crons: ['0 * * * *', '0 0 * * *'], note: 'hourly OTP+session cleanup / midnight device cleanup' },
+            { name: 'rald-notify', crons: ['*/5 * * * *'],             note: 'every 5 min notification dispatch' },
           ];
 
           async function putSchedules(workerName, crons) {
-            const url  = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/workers/scripts/${workerName}/schedules`;
-            const body = JSON.stringify(crons.map(cron => ({ cron })));
+            const url  = 'https://api.cloudflare.com/client/v4/accounts/' + ACCOUNT + '/workers/scripts/' + workerName + '/schedules';
+            const body = JSON.stringify(crons.map(c => ({ cron: c })));
             const res  = await fetch(url, {
               method:  'PUT',
-              headers: { 'Authorization': `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+              headers: { 'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json' },
               body,
             });
             const data = await res.json();
@@ -240,20 +218,19 @@ jobs:
           }
 
           (async () => {
-            console.log(`\n${'='.repeat(66)}`);
-            console.log(`  RALD Cron Activation — ${new Date().toISOString()}`);
-            console.log(`  DRY_RUN=${DRY_RUN}`);
+            console.log('\n' + '='.repeat(66));
+            console.log('  RALD Cron Activation - ' + new Date().toISOString());
+            console.log('  DRY_RUN=' + DRY_RUN);
             console.log('='.repeat(66) + '\n');
 
             for (const w of workers) {
-              console.log(`── ${w.name}: ${w.crons.join(', ')} (${w.note})`);
+              console.log('-- ' + w.name + ': ' + w.crons.join(', ') + ' (' + w.note + ')');
               if (DRY_RUN) { console.log('  [DRY RUN] skipped'); continue; }
               try {
                 const result = await putSchedules(w.name, w.crons);
-                console.log(`  ✅ Activated: ${JSON.stringify(result)}`);
+                console.log('  OK: ' + JSON.stringify(result));
               } catch (err) {
-                console.error(`  ❌ FAILED (${w.name}): ${err.message}`);
-                // Continue — partial success still valuable
+                console.error('  FAIL (' + w.name + '): ' + err.message);
               }
             }
 
@@ -263,6 +240,7 @@ jobs:
           })();
           JSEOF
 
-      - name: Audit record
+      - name: Audit
         if: always()
-        run: echo "AUDIT: job=activate-crons dry_run=${{ inputs.dry_run }} actor=${{ github.actor }} sha=${{ github.sha }} ts=$(date -u +%Y-%m-%dT%H:%M:%SZ) result=${{ job.status }}"
+        run: |
+          echo "AUDIT: job=activate-crons dry_run=${{ inputs.dry_run }} actor=${{ github.actor }} sha=${{ github.sha }} ts=$(date -u +%Y-%m-%dT%H:%M:%SZ) result=${{ job.status }}"
