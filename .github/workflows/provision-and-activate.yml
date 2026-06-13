@@ -476,3 +476,4 @@ jobs:
       - name: Audit
         if: always()
         run: echo "AUDIT: job=activate-crons dry_run=${{ inputs.dry_run }} actor=${{ github.actor }} sha=${{ github.sha }} ts=$(date -u +%Y-%m-%dT%H:%M:%SZ) result=${{ job.status }}"
+# last-triggered: 2026-06-13T08:43:11.773Z
