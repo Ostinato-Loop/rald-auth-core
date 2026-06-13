@@ -1,5 +1,8 @@
 // RALD Auth Core — Secure Cookie Utilities
 // domain=.rald.cloud HttpOnly session cookies for cross-product silent SSO.
+// SESSION-P1-001 (2026-06-13): Upgraded SameSite=Lax → SameSite=None
+//   (required for credentialed cross-origin requests during SSO redirects
+//   between *.rald.cloud subdomains). Requires Secure=true (enforced).
 // LILCKY STUDIO LIMITED
 
 const COOKIE_NAME   = "rald_session";
@@ -15,7 +18,7 @@ export function buildSessionCookie(token: string, ttlSeconds = SESSION_TTL_S): s
     `Max-Age=${ttlSeconds}`,
     "HttpOnly",
     "Secure",
-    "SameSite=Lax",
+    "SameSite=None",
   ].join("; ");
 }
 
@@ -29,7 +32,7 @@ export function clearSessionCookie(): string {
     "Expires=Thu, 01 Jan 1970 00:00:00 GMT",
     "HttpOnly",
     "Secure",
-    "SameSite=Lax",
+    "SameSite=None",
   ].join("; ");
 }
 
