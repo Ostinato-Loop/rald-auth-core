@@ -87,7 +87,8 @@ export function requireMachine(requiredPermission: string) {
         message: "This endpoint requires a valid machine identity token.",
       }, 401);
     }
-    c.set("machine" as any, machine);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (c as any).set("machine", machine);
     return next();
   };
 }
