@@ -158,24 +158,38 @@ sso.post("/exchange", authMiddleware, async (c) => {
     }, 400);
   }
 
-  // USN-001: Fetch username to include in SSO token — cross-app username propagation
+  // USN-001 + Phase 1: Fetch username, identity_state, and trust claims for SSO token
   const { data: userRow } = await db
     .from("auth_users")
-    .select("username")
+    .select("username,identity_state,trust_score,trust_level")
     .eq("id", user.id)
     .limit(1);
   const raldUsername: string | null = (userRow?.[0]?.username as string | null) ?? null;
+  const userRowData = (userRow?.[0] as Record<string, unknown> | undefined) ?? {};
+
+  // Identity state guard — SUSPENDED/DELETED accounts cannot receive app-scoped tokens
+  const ssoIdentityState = userRowData.identity_state as string | undefined;
+  if (ssoIdentityState === "SUSPENDED") {
+    await writeAuditLog(db, { userId: user.id, action: "sso_blocked", ip, status: "blocked", metadata: { appId: body.appId, reason: "SUSPENDED" } });
+    return c.json({ error: "Your account is temporarily unavailable. Contact support." }, 403);
+  }
+  if (ssoIdentityState === "DELETED") {
+    await writeAuditLog(db, { userId: user.id, action: "sso_blocked", ip, status: "blocked", metadata: { appId: body.appId, reason: "DELETED" } });
+    return c.json({ error: "Account not found." }, 403);
+  }
 
   const appToken = await signJwt(
     {
-      id:       user.id,
-      email:    user.email,
-      phone:    (user as unknown as Record<string, unknown>).phone ?? null,
-      role:     user.role,
-      username: raldUsername,  // USN-001: cross-app username claim propagation
-      appId:    body.appId,
-      source:   "rald-auth",
-      sso_v:    2,
+      id:          user.id,
+      email:       user.email,
+      phone:       (user as unknown as Record<string, unknown>).phone ?? null,
+      role:        user.role,
+      username:    raldUsername,
+      trust_score: (userRowData.trust_score ?? 0) as number,
+      trust_level: (userRowData.trust_level ?? "none") as string,
+      appId:       body.appId,
+      source:      "rald-auth",
+      sso_v:       2,
     },
     c.env.RALD_JWT_SECRET,
     3600
@@ -197,10 +211,15 @@ sso.post("/exchange", authMiddleware, async (c) => {
 
   c.header("Set-Cookie", buildSessionCookie(appToken, 3600));
   return c.json({
-    token: appToken, appId: body.appId, expiresIn: 3600,
+    token:        appToken,
+    appId:        body.appId,
+    expiresIn:    3600,
     username:     raldUsername,
     has_username: !!raldUsername,
-    redirect_to:  redirect_to ?? null, sso_version: 2,
+    trust_score:  (userRowData.trust_score ?? 0) as number,
+    trust_level:  (userRowData.trust_level ?? "none") as string,
+    redirect_to:  redirect_to ?? null,
+    sso_version:  2,
   });
 });
 
@@ -233,13 +252,23 @@ sso.post("/handoff", authMiddleware, async (c) => {
     }, 400);
   }
 
-  // USN-001: Fetch username for handoff token
+  // USN-001 + Phase 1: Fetch username and identity_state for handoff token
   const { data: handoffUserRow } = await db
     .from("auth_users")
-    .select("username")
+    .select("username,identity_state")
     .eq("id", user.id)
     .limit(1);
   const handoffUsername: string | null = (handoffUserRow?.[0]?.username as string | null) ?? null;
+  const handoffIdentityState = (handoffUserRow?.[0] as Record<string, unknown> | undefined)?.identity_state as string | undefined;
+
+  if (handoffIdentityState === "SUSPENDED") {
+    await writeAuditLog(db, { userId: user.id, action: "sso_blocked", ip, status: "blocked", metadata: { appId: body.appId, reason: "SUSPENDED", flow: "handoff" } });
+    return c.json({ error: "Your account is temporarily unavailable. Contact support." }, 403);
+  }
+  if (handoffIdentityState === "DELETED") {
+    await writeAuditLog(db, { userId: user.id, action: "sso_blocked", ip, status: "blocked", metadata: { appId: body.appId, reason: "DELETED", flow: "handoff" } });
+    return c.json({ error: "Account not found." }, 403);
+  }
 
   const handoffToken = await signJwt(
     { id: user.id, email: user.email, role: user.role, username: handoffUsername, appId: body.appId, purpose: "sso-handoff" },
