@@ -30,7 +30,7 @@ export const ECOSYSTEM_APPS = [
   { id: "manilla",       name: "Manilla",      url: "https://manilla.rald.cloud",        icon: "\uD83C\uDFB6" },
   { id: "profiles",      name: "Profile",      url: "https://profiles.rald.cloud",       icon: "\uD83D\uDC64" },
   { id: "loop",          name: "Loop",         url: "https://loop.rald.cloud",            icon: "\uD83C\uDFB5" },
-  { id: "messenger",     name: "Messenger",    url: "https://messenger.rald.cloud",       icon: "\uD83D\uDCAC" },
+  { id: "messenger",     name: "Messenger",    url: "https://chat.rald.cloud",            icon: "\uD83D\uDCAC" },
   { id: "rald-inbox",    name: "Inbox",        url: "https://inbox.rald.cloud",           icon: "\uD83D\uDCE5" },
   { id: "payrald",       name: "PayRald",      url: "https://pay.rald.cloud",             icon: "\uD83D\uDCB3" },
   { id: "dunarald",      name: "DunaRald",     url: "https://duna.rald.cloud",            icon: "\uD83D\uDED2" },
