@@ -75,7 +75,7 @@ export type Bindings = {
 export type Variables = {
   db:      SupabaseClient;
   user?:   JwtPayload;
-  logger?: { info: (msg: string, meta?: Record<string,unknown>) => void; warn: (msg: string, meta?: Record<string,unknown>) => void; error: (msg: string, meta?: Record<string,unknown>) => void };
+  logger?: { info: (msgOrMeta: string | Record<string,unknown>, msg?: string) => void; warn: (msgOrMeta: string | Record<string,unknown>, msg?: string) => void; error: (msgOrMeta: string | Record<string,unknown>, msg?: string) => void };
   machine?: { sub: string; aud: string; permissions: string[]; machine: boolean; iat: number; exp: number };
 };
 
