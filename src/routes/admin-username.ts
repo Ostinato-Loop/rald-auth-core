@@ -105,7 +105,7 @@ adminUsername.get("/ghost-audit", async (c) => {
 
     // 3. Active/claimed usernames whose auth_users row is missing
     // (join check — approximate via left anti-join via RPC if available, else sampled)
-    db.rpc("audit_ghost_usernames_no_user_row", {}).catch(() => ({ data: null, error: null })),
+    (db.rpc("audit_ghost_usernames_no_user_row", {}) as unknown as Promise<{data:any;error:any}>).catch(() => ({ data: null, error: null })),
 
     // 4. Active/claimed usernames where neither email nor phone is verified
     db.from("usernames")
@@ -116,7 +116,7 @@ adminUsername.get("/ghost-audit", async (c) => {
 
     // 5. Current PENDING count (in-flight registrations)
     db.from("usernames")
-      .select("username", { count: "exact", head: true })
+      .select("username")
       .eq("status", "PENDING")
       .gte("pending_until", now),
   ]);
@@ -273,7 +273,7 @@ adminUsername.post("/ghost-repair", async (c) => {
             })
             .eq("status", "PENDING")
             .lt("pending_until", now)
-            .select("username", { count: "exact", head: true });
+            .select("username");
 
           // Also clean up the dangling auth_users rows created during pending registration
           const pendingEmails = expired.map((u: { username: string }) => `${u.username}.pending@rald.identity`);
@@ -290,7 +290,7 @@ adminUsername.post("/ghost-repair", async (c) => {
         // Dry run — just count
         const { count } = await db
           .from("usernames")
-          .select("username", { count: "exact", head: true })
+          .select("username")
           .eq("status", "PENDING")
           .lt("pending_until", now);
         results.expired_pending_released = count ?? 0;
@@ -309,12 +309,12 @@ adminUsername.post("/ghost-repair", async (c) => {
           .update({ status: "UNDER_REVIEW", active: false, released_at: now })
           .is("user_id", null)
           .in("status", ["ACTIVE", "CLAIMED"])
-          .select("username", { count: "exact", head: true });
+          .select("username");
         results.null_userid_moved = count ?? 0;
       } else {
         const { count } = await db
           .from("usernames")
-          .select("username", { count: "exact", head: true })
+          .select("username")
           .is("user_id", null)
           .in("status", ["ACTIVE", "CLAIMED"]);
         results.null_userid_moved = count ?? 0;
