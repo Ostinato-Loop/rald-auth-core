@@ -443,20 +443,24 @@ session.post("/auth/refresh", async (c) => {
   const db = c.get("db");
   const { data: user } = await db
     .from("auth_users")
-    .select("id,email,username,name,role,trust_level,status")
+    .select("id,email,username,name,role,trust_score,trust_level,identity_state,status")
     .eq("id", payload.id)
     .single();
 
-  if (!user || user.status === "suspended") {
+  if (!user) {
     c.header("Set-Cookie", clearSessionCookie());
-    return c.json(
-      {
-        ok: false,
-        reason: user?.status === "suspended" ? "account_suspended" : "user_not_found",
-        redirect: "https://profiles.rald.cloud/login",
-      },
-      401
-    );
+    return c.json({ ok: false, reason: "user_not_found", redirect: "https://profiles.rald.cloud/login" }, 401);
+  }
+
+  // Identity state machine guard — SUSPENDED/DELETED/legacy-suspended blocked at refresh
+  const refreshIdentityState = (user as unknown as Record<string, unknown>).identity_state as string | undefined;
+  if (user.status === "suspended" || refreshIdentityState === "SUSPENDED") {
+    c.header("Set-Cookie", clearSessionCookie());
+    return c.json({ ok: false, reason: "account_suspended", redirect: "https://profiles.rald.cloud/suspended" }, 403);
+  }
+  if (refreshIdentityState === "DELETED") {
+    c.header("Set-Cookie", clearSessionCookie());
+    return c.json({ ok: false, reason: "account_deleted", redirect: "https://profiles.rald.cloud/login" }, 403);
   }
 
   // ── 5. Issue new JWT with fresh 30-day expiry ───────────────────────────────
@@ -466,16 +470,17 @@ session.post("/auth/refresh", async (c) => {
 
   const newToken = await signJwt(
     {
-      id:         user.id,
-      email:      user.email,
-      username:   user.username    ?? null,
-      name:       user.name        ?? null,
-      role:       user.role        ?? "user",
-      trust:      user.trust_level ?? "none",
-      session_id: newSessionId,
-      sso_v:      2,
-      via:        "refresh",
-      app_id:     (p.appId ?? p.app_id ?? null) as string | null,
+      id:          user.id,
+      email:       user.email,
+      username:    user.username    ?? null,
+      name:        user.name        ?? null,
+      role:        user.role        ?? "user",
+      trust_score: ((user as unknown as Record<string, unknown>).trust_score ?? 0) as number,
+      trust_level: user.trust_level ?? "none",
+      session_id:  newSessionId,
+      sso_v:       2,
+      via:         "refresh",
+      app_id:      (p.appId ?? p.app_id ?? null) as string | null,
     },
     c.env.RALD_JWT_SECRET,
     SESSION_TTL
