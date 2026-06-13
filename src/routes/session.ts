@@ -323,10 +323,14 @@ session.get("/sso/silent", async (c) => {
     }
   }
   c.header("Set-Cookie", buildSessionCookie(token));
+  // ZERO-FRICTION-001: Return access_token so any RALD product can restore
+  // a session from /sso/silent without needing its own worker re-sign endpoint.
+  // The token value is the existing valid cookie JWT — already verified above.
   return c.json({
-    valid: true,
-    user: { id: payload.id, email: payload.email, role: payload.role },
-    session: { expires_at: new Date(payload.exp * 1000).toISOString() },
+    valid:        true,
+    access_token: token,
+    user:         { id: payload.id, email: payload.email, role: payload.role },
+    session:      { expires_at: new Date(payload.exp * 1000).toISOString() },
     identity_hub: "profiles.rald.cloud",
   });
 });
