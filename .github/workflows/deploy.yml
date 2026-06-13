@@ -102,10 +102,13 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # SB_SECRET-001: Accept both canonical name and SB_SECRET alias set by operator.
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SB_SECRET: ${{ secrets.SB_SECRET }}
         run: |
-          if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then echo "WARNING: SUPABASE_SERVICE_ROLE_KEY not set — secret already on worker"; exit 0; fi
-          echo "$SUPABASE_SERVICE_ROLE_KEY" | npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY --name rald-auth && echo "SUPABASE_SERVICE_ROLE_KEY ✓" || echo "WARNING: secret push failed — value already deployed"
+          KEY="${SUPABASE_SERVICE_ROLE_KEY:-$SB_SECRET}"
+          if [ -z "$KEY" ]; then echo "WARNING: SUPABASE_SERVICE_ROLE_KEY / SB_SECRET not set — secret must already be on worker"; exit 0; fi
+          echo "$KEY" | npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY --name rald-auth && echo "SUPABASE_SERVICE_ROLE_KEY ✓" || echo "WARNING: secret push failed — value may already be deployed"
 
       - name: Push TERMII_API_KEY
         continue-on-error: true
@@ -160,7 +163,9 @@ jobs:
         env:
           SUPABASE_URL: https://onxdcikfttdmnhofsuwo.supabase.co
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SB_SECRET: ${{ secrets.SB_SECRET }}
         run: |
+          SUPABASE_SERVICE_ROLE_KEY="${SUPABASE_SERVICE_ROLE_KEY:-$SB_SECRET}"
           if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
             echo "WARNING: SUPABASE_SERVICE_ROLE_KEY not set — skipping country seed"
             exit 0
