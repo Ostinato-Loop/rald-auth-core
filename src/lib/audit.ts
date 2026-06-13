@@ -115,7 +115,13 @@ export type AuditAction =
   // Permissions — Sprint 2026-06-14
   | "permission.override"
   // Trust — Sprint 2026-06-14
-  | "trust.recomputed";
+  | "trust.recomputed"
+  // Phase 11 additions (2026-06-13)
+  | "login_blocked"
+  | "sso_blocked"
+  | "provision_all"
+  | "username_pending"
+  | "ghost_username_repair";
 
 export interface AuditEntry {
   userId?: string | null;
@@ -125,7 +131,7 @@ export interface AuditEntry {
   resourceId?: string;
   ip?: string;
   userAgent?: string;
-  status?: "success" | "failure" | "blocked";
+  status?: "success" | "failure" | "blocked" | "partial";
   metadata?: Record<string, unknown>;
 }
 
