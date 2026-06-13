@@ -30,6 +30,17 @@ import type { KvSessionStore } from "../lib/session";
 
 const auth = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
+/**
+ * Identity State Guard — Phase 1 / RALD Ecosystem Finalization
+ * Blocks SUSPENDED and DELETED identities at every JWT issuance point.
+ * Returns a typed error object; caller responds with c.json(guard.error, guard.status).
+ */
+function checkIdentityState(state: string | null | undefined): { error: string; status: 403 } | null {
+  if (state === "SUSPENDED") return { error: "Your account is temporarily unavailable. Contact support.", status: 403 };
+  if (state === "DELETED")   return { error: "Account not found.", status: 403 };
+  return null;
+}
+
 type UserRow = {
   id: string;
   email: string;
@@ -78,7 +89,7 @@ auth.post("/login", async (c) => {
 
   const { data: users } = await db
     .from("auth_users")
-    .select("id,email,name,role,password_hash,created_at")
+    .select("id,email,name,role,password_hash,created_at,identity_state,trust_score,trust_level")
     .eq("email", email)
     .limit(1);
 
@@ -88,8 +99,21 @@ auth.post("/login", async (c) => {
     return c.json({ error: "Invalid email or password" }, 401);
   }
 
+  const stateGuard = checkIdentityState((user as unknown as Record<string, unknown>).identity_state as string);
+  if (stateGuard) {
+    await writeAuditLog(db, { userId: user.id, action: "login_blocked", ip, status: "blocked", metadata: { email, reason: (user as unknown as Record<string, unknown>).identity_state } });
+    return c.json({ error: stateGuard.error }, stateGuard.status);
+  }
+
   const token = await signJwt(
-    { id: user.id, email: user.email, role: user.role, iss: "rald.cloud" },
+    {
+      id:          user.id,
+      email:       user.email,
+      role:        user.role,
+      trust_score: ((user as unknown as Record<string, unknown>).trust_score ?? 0) as number,
+      trust_level: ((user as unknown as Record<string, unknown>).trust_level ?? "none") as string,
+      iss:         "rald.cloud",
+    },
     c.env.RALD_JWT_SECRET
   );
   try {
@@ -148,7 +172,7 @@ auth.post("/register", async (c) => {
   if (body.phone?.trim()) meta.phone = body.phone.trim().replace(/\D/g, "");
   if (role === "merchant" && body.businessName) meta.business_name = body.businessName.trim();
 
-  const insertData: Record<string, unknown> = { email, password_hash, name, role };
+  const insertData: Record<string, unknown> = { email, password_hash, name, role, identity_state: "ACTIVE" };
   if (Object.keys(meta).length) insertData.metadata = meta;
 
   const { data: newUsers, error } = await db
@@ -337,13 +361,18 @@ auth.post("/verify-otp", async (c) => {
   try {
     const { data } = await db
       .from("auth_users")
-      .select("id,email,name,role,created_at")
+      .select("id,email,name,role,created_at,identity_state")
       .filter("metadata->>phone", "eq", phone)
       .limit(1);
     existingUser = data?.[0];
   } catch {}
 
   if (existingUser) {
+    const stateGuard = checkIdentityState((existingUser as unknown as Record<string, unknown>).identity_state as string);
+    if (stateGuard) {
+      await writeAuditLog(db, { userId: existingUser.id, action: "login_blocked", ip, status: "blocked", metadata: { phone, reason: (existingUser as unknown as Record<string, unknown>).identity_state } });
+      return c.json({ error: stateGuard.error }, stateGuard.status);
+    }
     const token = await signJwt(
       { id: existingUser.id, email: existingUser.email, role: existingUser.role },
       c.env.RALD_JWT_SECRET
@@ -398,7 +427,7 @@ auth.post("/register-from-otp", async (c) => {
 
   const { data: newUsers, error } = await db
     .from("auth_users")
-    .insert({ email, name, role, password_hash: "", metadata: meta })
+    .insert({ email, name, role, password_hash: "", metadata: meta, identity_state: "ACTIVE" })
     .select("id,email,name,role,created_at")
     .limit(1);
 
@@ -493,12 +522,17 @@ auth.post("/verify-login-email-otp", async (c) => {
 
   const { data: users } = await db
     .from("auth_users")
-    .select("id,email,name,role,created_at")
+    .select("id,email,name,role,created_at,identity_state")
     .eq("email", email)
     .limit(1);
 
   const existingUser = users?.[0];
   if (existingUser) {
+    const stateGuard = checkIdentityState((existingUser as unknown as Record<string, unknown>).identity_state as string);
+    if (stateGuard) {
+      await writeAuditLog(db, { userId: existingUser.id, action: "login_blocked", ip, status: "blocked", metadata: { email, reason: (existingUser as unknown as Record<string, unknown>).identity_state } });
+      return c.json({ error: stateGuard.error }, stateGuard.status);
+    }
     const token = await signJwt(
       { id: existingUser.id, email: existingUser.email, role: existingUser.role },
       c.env.RALD_JWT_SECRET
