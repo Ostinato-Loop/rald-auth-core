@@ -15,4 +15,4 @@ jobs:
       - name: Upgrade npm
         run: npm install -g npm@latest --prefer-online
       - run: npm install
-      - run: npm run check
+      - run: npm run typecheck
