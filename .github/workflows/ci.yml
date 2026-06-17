@@ -1,49 +1,18 @@
 name: CI
 
 on:
-  push:
-    branches: ["**"]
-  pull_request:
-    branches: [main]
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  push:        { branches: [main] }
+  pull_request: { branches: [main] }
 
 jobs:
   typecheck:
-    name: Type Check
+    name: Typecheck
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - name: Install dependencies
-        run: npm install
-      - name: Type check
-        run: npm run typecheck
-      - name: Lint
-        run: npm run lint
-      - name: Security audit
-        run: npm audit --audit-level=high
-        continue-on-error: true
-
-  build:
-    name: Build (dry-run)
-    runs-on: ubuntu-latest
-    needs: typecheck
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - name: Install dependencies
-        run: npm install
-      - name: Build (dry-run)
-        run: npm run build
-        env:
-          CLOUDFLARE_API_TOKEN: dry-run-no-token-needed
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        with: { node-version: "22" }
+      - name: Upgrade npm
+        run: npm install -g npm@latest --prefer-online
+      - run: npm install
+      - run: npm run check
