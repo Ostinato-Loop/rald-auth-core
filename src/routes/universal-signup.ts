@@ -32,9 +32,7 @@ signup.post("/", authMiddleware, async (c) => {
   // Rate-limit: 5 signup attempts per user per hour
   const { allowed } = await checkRateLimit(
     c.env.RATE_LIMIT_KV,
-    `signup:${user.id}`,
-    5,
-    3600
+    { key: `signup:${user.id}`, limit: 5, windowSeconds: 3600 }
   );
   if (!allowed) return c.json({ error: "Too many signup requests" }, 429);
 
@@ -232,7 +230,7 @@ signup.post("/retry/:rald_id", adminMiddleware, async (c) => {
 
   // Run all steps — idempotent, skips already-provisioned ones
   const report = await provisioner.provisionAll(input);
-  await provisioner.finalizeIdentity(raldId);
+  await provisioner.finalizeIdentity(raldId!);
 
   return c.json({
     ok:                true,
