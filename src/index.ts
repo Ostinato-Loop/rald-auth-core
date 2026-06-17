@@ -1,17 +1,18 @@
 // RALD Auth Core — Cloudflare Worker
-// Deployed at: auth.rald.cloud | Version: 2.9.0
+// Deployed at: auth.rald.cloud | Version: 3.0.0
+// Changelog v3.0.0: Phase 1 — Universal Identity Layer
+//   - POST /signup: full identity chain (rald_users + wallet + ALIA + mail + messenger + event)
+//   - GET /signup/status/:rald_id: provisioning status
+//   - POST /signup/retry/:rald_id: admin force retry
+//   - GET/POST /admin/provision/*: provisioning dashboard API
+//   - Retry queue drained in scheduled job (hourly)
+//   - events.rald.cloud wired via RALD_INTERNAL_SECRET
+//   - EVENTS_BUS_URL, MACHINE_KEY_ID, MACHINE_KEY_SECRET added to Bindings
 // Changelog v2.9.0: Phase 1 — Public Beta Blockers
 //   - /identity-brain/* namespace alias for /identity/* (Rule #4 spec compliance)
 //   - Scheduled cleanup handler: OTP, sessions, devices, rotation alerts, health snapshot
 //   - MACHINE_IDENTITY_SECRET + ADMIN_USER_ID bindings for automated alerting
 // Changelog v2.8.0: Loop Identity Integration
-//   - POST /auth/loop-claim: one-step username claim for Loop — issues JWT immediately
-//     Loop users are now first-class RALD identities from day one (no more guest_xxx@loop.guest)
-// Changelog v2.7.0: Identity Audit & Username Ownership Sprint (P1–P6)
-// Changelog v2.6.0: QR Code Login + WebAuthn/Face Auth end-to-end
-// Changelog v2.5.0: V2 Username-First Identity — /username, /auth/register-username, /recovery
-// Changelog v2.3.0: Phase H.2 — Privacy Center, Verification Engine, Role Engine, Ecosystem Events
-// Phase 8: Security Hardening — CSP, HSTS, Referrer-Policy headers on all responses
 // LILCKY STUDIO LIMITED
 
 import { Hono } from "hono";
@@ -43,16 +44,20 @@ import migrationRoutes          from "./routes/migration";
 import loopAuthRoutes           from "./routes/loop-auth";
 import countryRoutes            from "./routes/country";
 import expansionRoutes          from "./routes/expansion";
-import smartLoginRoute           from "./routes/smart-login";
-import adminUsernameRoutes       from "./routes/admin-username";
-import identityRoutes            from "./routes/identity";
-import identityBrainRoutes        from "./routes/identity-brain";
+import smartLoginRoute          from "./routes/smart-login";
+import adminUsernameRoutes      from "./routes/admin-username";
+import identityRoutes           from "./routes/identity";
+import identityBrainRoutes      from "./routes/identity-brain";
 import developerRoutes          from "./routes/developer";
 import machineRoutes            from "./routes/machine";
 import trustRoutes              from "./routes/trust";
 import permissionsRoutes        from "./routes/permissions";
-import { requestLogger }         from "./lib/logger";
+// Phase 1: Universal Identity Layer
+import universalSignupRoutes    from "./routes/universal-signup";
+import provisionDashboardRoutes from "./routes/provision-dashboard";
+import { requestLogger }        from "./lib/logger";
 import { runHourlyCleanup, runDailyCleanup, runHealthSnapshot } from "./jobs/cleanup";
+import { processRetryQueue }    from "./lib/identity-provisioner";
 
 export type Bindings = {
   SUPABASE_URL:              string;
@@ -66,10 +71,15 @@ export type Bindings = {
   ENVIRONMENT:               string;
   RATE_LIMIT_KV:             KVNamespace;
   RALD_SESSION_KV:           KvSessionStore;
-  OPEN_OBSERVE_API_KEY?:     string;  // OpenObserve ingest key (C-CERT-004)
-  OPEN_OBSERVE_ENDPOINT?:    string;  // e.g. https://observe.rald.cloud/api/rald/rald-auth-core/_json
-  MACHINE_IDENTITY_SECRET?:  string;  // Phase 1: auth service machine token for calling notify
-  ADMIN_USER_ID?:            string;  // Phase 1: admin user UUID for alerting
+  OPEN_OBSERVE_API_KEY?:     string;
+  OPEN_OBSERVE_ENDPOINT?:    string;
+  MACHINE_IDENTITY_SECRET?:  string;
+  ADMIN_USER_ID?:            string;
+  // Phase 1: Event bus + machine identity
+  EVENTS_BUS_URL?:           string;   // defaults to https://events.rald.cloud
+  RALD_INTERNAL_SECRET?:     string;   // X-RALD-Internal-Key header for event bus
+  MACHINE_KEY_ID?:           string;
+  MACHINE_KEY_SECRET?:       string;
 };
 
 export type Variables = {
@@ -79,7 +89,7 @@ export type Variables = {
   machine?: { sub: string; aud: string; permissions: string[]; machine: boolean; iat: number; exp: number };
 };
 
-const VERSION = "2.9.0";
+const VERSION = "3.0.0";
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -109,6 +119,7 @@ const STATIC_ORIGINS = new Set([
   "https://business.rald.cloud",
   "https://ostloop.name.ng",
   "https://identity.rald.cloud",
+  "https://provision.rald.cloud",
   "https://rald-identity.pages.dev",
   "https://rald-auth-ui.pages.dev",
   "https://rald-app.pages.dev",
@@ -124,7 +135,7 @@ function isAllowedOrigin(origin: string): boolean {
   return false;
 }
 
-// ── Request logger — OpenObserve log shipping ────────────────────────────────
+// ── Request logger — OpenObserve log shipping ─────────────────────────────────
 app.use("*", requestLogger("rald-auth-core"));
 
 app.use("*", cors({
@@ -134,7 +145,7 @@ app.use("*", cors({
   credentials: true,
 }));
 
-// ── Phase 8: Security headers on every response ───────────────────────────────
+// ── Security headers on every response ───────────────────────────────────────
 app.use("*", async (c, next) => {
   await next();
   const res = c.res;
@@ -175,17 +186,18 @@ app.get("/ready", (c) =>
   c.json({
     ready: !!(c.env.SUPABASE_URL && c.env.RALD_JWT_SECRET && c.env.RESEND_API_KEY),
     checks: {
-      supabase:      !!c.env.SUPABASE_URL && !!c.env.SUPABASE_SERVICE_ROLE_KEY,
-      jwt:           !!c.env.RALD_JWT_SECRET,
-      termii:        !!c.env.TERMII_API_KEY,
-      resend:        !!c.env.RESEND_API_KEY,
-      clerk:         !!c.env.CLERK_SECRET_KEY && !!c.env.CLERK_PUBLISHABLE_KEY,
-      rate_limit_kv: !!(c.env.RATE_LIMIT_KV),
-      session_kv:    !!(c.env.RALD_SESSION_KV),
-      observability: !!(c.env.OPEN_OBSERVE_API_KEY && c.env.OPEN_OBSERVE_ENDPOINT),
-      machine_auth:  !!(c.env.MACHINE_IDENTITY_SECRET),
+      supabase:           !!c.env.SUPABASE_URL && !!c.env.SUPABASE_SERVICE_ROLE_KEY,
+      jwt:                !!c.env.RALD_JWT_SECRET,
+      termii:             !!c.env.TERMII_API_KEY,
+      resend:             !!c.env.RESEND_API_KEY,
+      clerk:              !!c.env.CLERK_SECRET_KEY && !!c.env.CLERK_PUBLISHABLE_KEY,
+      rate_limit_kv:      !!(c.env.RATE_LIMIT_KV),
+      session_kv:         !!(c.env.RALD_SESSION_KV),
+      observability:      !!(c.env.OPEN_OBSERVE_API_KEY && c.env.OPEN_OBSERVE_ENDPOINT),
+      machine_auth:       !!(c.env.MACHINE_KEY_ID && c.env.MACHINE_KEY_SECRET),
+      event_bus:          !!(c.env.RALD_INTERNAL_SECRET),
     },
-    phase: "V2.9 — Phase 1 Public Beta Blockers",
+    phase: "V3.0 — Universal Identity Layer",
     ...serviceInfo(c),
   })
 );
@@ -198,12 +210,12 @@ app.get("/system/status", (c) =>
     environment:  c.env.ENVIRONMENT ?? "production",
     features: {
       auth:               "✓ login, register, OTP (email+SMS), password reset",
-      loop_identity:      "✓ /auth/loop-claim — username-first, JWT issued immediately, no OTP required",
+      loop_identity:      "✓ /auth/loop-claim — username-first, JWT issued immediately",
       username:           "✓ check, claim, change (30-day policy), migration flow",
       sessions:           "✓ create, revoke, revoke-all, device revoke",
       devices:            "✓ list, remove, trust",
       sso:                "✓ exchange, clerk-exchange, silent SSO",
-      profiles:           "✓ me, update (incl. region/country), apps, identity, sessions, activity",
+      profiles:           "✓ me, update (incl. region/country), apps, identity, sessions",
       privacy:            "✓ me, export, permissions, delete-request, cancel-deletion",
       verification:       "✓ status, apply, withdraw, badge",
       roles:              "✓ all, me, request, capabilities",
@@ -211,10 +223,17 @@ app.get("/system/status", (c) =>
       graph:              "✓ identity graph, mutual connections, suggestions",
       migration:          "✓ identity-status, claim-username, repair, registry-check (admin)",
       country_activation: "✓ /country/:code status, /country/waitlist join, /country/:code/access gates",
-      expansion_admin:    "✓ /admin/expansion list, transition pipeline, emergency restrict, PayRald gate, scorecard",
+      expansion_admin:    "✓ /admin/expansion list, transition pipeline, emergency restrict",
       security_headers:   "✓ HSTS, CSP, X-Frame-Options, Referrer-Policy",
       identity_brain:     "✓ /identity-brain/* — canonical namespace (aliases /identity/*)",
       scheduled_cleanup:  "✓ OTP, sessions, devices, rotation alerts, health snapshot",
+      // Phase 1: Universal Identity Layer
+      universal_signup:   "✓ POST /signup — rald_users + wallet + ALIA + mail + messenger + event",
+      provision_status:   "✓ GET /signup/status/:rald_id",
+      provision_retry:    "✓ POST /signup/retry/:rald_id (admin)",
+      provision_dashboard:"✓ GET /admin/provision/dashboard",
+      event_bus:          "✓ events.rald.cloud wired — identity.created emitted on every signup",
+      retry_queue:        "✓ provision_retry_queue — exponential backoff, drained hourly",
     },
     timestamp: new Date().toISOString(),
   })
@@ -248,6 +267,14 @@ app.get("/system/dependencies", async (c) => {
       return { name: "resend", ok: r.ok, latency: Date.now() - t0 };
     })(),
     (async () => {
+      const eventsUrl = c.env.EVENTS_BUS_URL ?? "https://events.rald.cloud";
+      const t0 = Date.now();
+      const r  = await fetch(`${eventsUrl}/health`, {
+        signal: AbortSignal.timeout(5000),
+      }).catch(() => ({ ok: false }));
+      return { name: "event_bus", ok: r.ok, latency: Date.now() - t0, url: eventsUrl };
+    })(),
+    (async () => {
       const kv = c.env.RALD_SESSION_KV as unknown as { get: (k: string) => Promise<string | null> } | null;
       if (!kv) return { name: "session_kv", ok: false, latency: 0, note: "not bound" };
       const t0 = Date.now();
@@ -267,7 +294,7 @@ app.get("/system/dependencies", async (c) => {
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.route("/auth",                   authRoutes);
-app.route("/auth",                   loopAuthRoutes);   // POST /auth/loop-claim
+app.route("/auth",                   loopAuthRoutes);
 app.route("/devices",                devicesRoutes);
 app.route("/sso",                    ssoRoutes);
 app.route("/sso",                    clerkRoutes);
@@ -284,27 +311,32 @@ app.route("/auth/login-username",    loginUsernameRoute);
 app.route("/recovery",               recoveryRoutes);
 app.route("/auth/qr",                qrRoutes);
 app.route("/auth/webauthn",          webauthnRoutes);
-app.route("/auth/smart-login",        smartLoginRoute);
-app.route("/admin/usernames",         adminUsernameRoutes);
+app.route("/auth/smart-login",       smartLoginRoute);
+app.route("/admin/usernames",        adminUsernameRoutes);
 app.route("/admin/metrics",          metricsRoutes);
 app.route("/admin/expansion",        expansionRoutes);
+app.route("/admin/provision",        provisionDashboardRoutes); // Phase 1: Provision Dashboard
 app.route("/migration",              migrationRoutes);
 app.route("/country",                countryRoutes);
 app.route("/identity",               identityRoutes);
-app.route("/identity-brain",         identityBrainRoutes); // manifest + capabilities at /identity-brain/ and /identity-brain/health
-app.route("/identity-brain",         identityRoutes);   // Phase 1: canonical Identity Brain namespace (aliases /identity/*)
+app.route("/identity-brain",         identityBrainRoutes);
+app.route("/identity-brain",         identityRoutes);
 app.route("/developer",              developerRoutes);
 app.route("/machine",                machineRoutes);
 app.route("/trust",                  trustRoutes);
 app.route("/permissions",            permissionsRoutes);
+app.route("/signup",                 universalSignupRoutes);    // Phase 1: Universal Signup
 app.route("/",                       sessionRoutes);
 
 // ── Root ──────────────────────────────────────────────────────────────────────
 app.get("/", (c) => c.json({
-  docs:           "https://learn.rald.cloud/developers",
-  auth:           "https://auth.rald.cloud/health",
-  identity_brain: "https://auth.rald.cloud/identity-brain/intelligence",
-  learn:          "https://learn.rald.cloud",
+  docs:             "https://learn.rald.cloud/developers",
+  auth:             "https://auth.rald.cloud/health",
+  signup:           "https://auth.rald.cloud/signup",
+  identity_brain:   "https://auth.rald.cloud/identity-brain/intelligence",
+  provision_status: "https://auth.rald.cloud/signup/status/:rald_id",
+  dashboard:        "https://auth.rald.cloud/admin/provision/dashboard",
+  learn:            "https://learn.rald.cloud",
   ...serviceInfo(c),
 }));
 app.notFound((c) => c.json({ error: "Not found", path: c.req.path }, 404));
@@ -314,10 +346,9 @@ app.onError((err, c) => {
 });
 
 export default {
-  // ── HTTP handler ────────────────────────────────────────────────────────────
+  // ── HTTP handler ───────────────────────────────────────────────────────────
   async fetch(req: Request, env: Bindings, ctx: ExecutionContext): Promise<Response> {
     const pathname = new URL(req.url).pathname;
-    // Health bypass — liveness probes must always get a 200
     if (pathname === "/health" || pathname === "/healthz" || pathname === "/healthcheck" || pathname === "/readyz") {
       return app.fetch(req, env, ctx);
     }
@@ -335,24 +366,27 @@ export default {
     return app.fetch(req, env, ctx);
   },
 
-  // ── Scheduled handler — Phase 1 Self-Healing Ops ───────────────────────────
-  // Cron schedule (defined in wrangler.toml [triggers]):
-  //   "0 * * * *"  — hourly: OTP cleanup + expired session deletion
-  //   "0 0 * * *"  — daily:  device cleanup + rotation alerts + health snapshot
+  // ── Scheduled handler ──────────────────────────────────────────────────────
+  // "0 * * * *"  — hourly: OTP cleanup + expired sessions + retry queue drain
+  // "0 0 * * *"  — midnight UTC: device cleanup + rotation alerts + health snapshot
   async scheduled(event: ScheduledEvent, env: Bindings, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(
       (async () => {
         console.log(`[rald-auth-scheduled] cron fired: ${event.cron} at ${new Date().toISOString()}`);
 
-        // Both crons run hourly cleanup
+        // Hourly: OTP + session cleanup
         const hourlyStats = await runHourlyCleanup(env);
         console.log("[rald-auth-scheduled] hourly cleanup:", JSON.stringify(hourlyStats));
+
+        // Hourly: drain provision retry queue
+        const db = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+        const retryStats = await processRetryQueue(db);
+        console.log("[rald-auth-scheduled] retry queue:", JSON.stringify(retryStats));
 
         // Daily jobs (midnight UTC only)
         if (event.cron === "0 0 * * *") {
           const dailyStats = await runDailyCleanup(env);
           console.log("[rald-auth-scheduled] daily cleanup:", JSON.stringify(dailyStats));
-
           await runHealthSnapshot(env);
         }
       })()
