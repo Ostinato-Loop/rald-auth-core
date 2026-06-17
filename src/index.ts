@@ -185,7 +185,6 @@ app.get("/ready", (c) =>
 app.get("/system/status", (c) =>
   c.json({
     status: "operational",
-    version: VERSION,
     features: {
       // Original auth features
       auth:"✓ login, register, OTP, password reset",
@@ -210,7 +209,6 @@ app.get("/system/status", (c) =>
       event_bus:"✓ identity.created → events.rald.cloud",
       retry_queue:"✓ exponential backoff, 10 attempts, drained hourly",
     },
-    timestamp: new Date().toISOString(),
     ...serviceInfo(c),
   })
 );
