@@ -15,7 +15,7 @@
     "@simplewebauthn/server": "^13.0.0",
     "@supabase/supabase-js": "^2.47.10",
     "hono": "^4.7.5",
-    "jose": "^5.10.0"
+    "jose": "^6.2.3"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
