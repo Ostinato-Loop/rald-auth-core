@@ -1,4 +1,4 @@
-name: Deploy
+name: Deploy to AWS ECR + App Runner
 
 on:
   push:
@@ -10,245 +10,175 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    name: Deploy to Cloudflare Workers (auth.rald.cloud)
+  wizmac-read:
+    name: WIZMAC Read (mandatory)
     runs-on: ubuntu-latest
-    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read WIZMAC before any operation
+        run: |
+          echo "╔══════════════════════════════════════╗"
+          echo "║  WIZMAC MANDATORY READ — Pre-Deploy  ║"
+          echo "╚══════════════════════════════════════╝"
+          if [ -f WIZMAC.md ]; then
+            echo "✅ WIZMAC.md found"
+            head -5 WIZMAC.md
+          else
+            echo "⚠️  WIZMAC.md missing — add it before next sprint"
+          fi
+          echo "Reading WIZMAC ecosystem state..."
+          curl -sf https://sekani.rald.cloud/api/wizmac/read-state \
+            -H "Accept: application/json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print('WIZMAC status:', d.get('system','unknown'))
+ss=d.get('sprintState')
+if ss: print('Sprint score:', ss.get('score','?'))
+print('Recent events:', len(d.get('recentEvents',[])))
+print('Read at:', d.get('readAt',''))
+" 2>/dev/null || echo "⚠️  WIZMAC API unreachable (non-blocking)"
+      - name: Check kill switch
+        run: |
+          STATUS=$(curl -sf https://sekani.rald.cloud/api/wizmac/read-state | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+ks=d.get('killSwitch')
+if ks and isinstance(ks.get('value'), dict) and ks['value'].get('active'):
+  print('ACTIVE:', ks['value'].get('reason','no reason given'))
+  sys.exit(1)
+print('OK')
+" 2>/dev/null) || STATUS="OK"
+          if echo "$STATUS" | grep -q "^ACTIVE:"; then
+            echo "🚫 WIZMAC KILL SWITCH ACTIVE: $STATUS"
+            echo "   All deployments halted. Contact Principal Architect."
+            exit 1
+          fi
+          echo "✅ Kill switch: inactive. Proceeding with deploy."
+
+  build-and-push:
+    name: Build → ECR Push
+    needs: wizmac-read
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.build.outputs.image }}
     steps:
       - uses: actions/checkout@v4
 
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push to ECR
+        id: build
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ github.event.repository.name }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          aws ecr describe-repositories --repository-names $ECR_REPOSITORY \
+            || aws ecr create-repository --repository-name $ECR_REPOSITORY \
+               --image-scanning-configuration scanOnPush=true \
+               --encryption-configuration encryptionType=AES256
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+                       -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "✅ Pushed: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+  deploy-app-runner:
+    name: Deploy → App Runner
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Deploy to AWS App Runner
+        env:
+          SERVICE_NAME: ${{ github.event.repository.name }}
+          IMAGE: ${{ needs.build-and-push.outputs.image }}
+        run: |
+          SERVICE_ARN=$(aws apprunner list-services \
+            --query "ServiceSummaryList[?ServiceName=='$SERVICE_NAME'].ServiceArn" \
+            --output text 2>/dev/null)
+
+          if [ -z "$SERVICE_ARN" ]; then
+            echo "Creating new App Runner service: $SERVICE_NAME"
+            ROLE_ARN=$(aws iam get-role --role-name AppRunnerECRRole \
+              --query "Role.Arn" --output text 2>/dev/null || echo "")
+            aws apprunner create-service \
+              --service-name "$SERVICE_NAME" \
+              --source-configuration "{
+                \"ImageRepository\": {
+                  \"ImageIdentifier\": \"$IMAGE\",
+                  \"ImageRepositoryType\": \"ECR\",
+                  \"ImageConfiguration\": {
+                    \"Port\": \"3000\",
+                    \"RuntimeEnvironmentVariables\": {
+                      \"NODE_ENV\": \"production\"
+                    }
+                  }
+                },
+                \"AutoDeploymentsEnabled\": false,
+                \"AuthenticationConfiguration\": {
+                  \"AccessRoleArn\": \"$ROLE_ARN\"
+                }
+              }" \
+              --instance-configuration "Cpu=0.25 vCPU,Memory=0.5 GB"
+          else
+            echo "Updating existing App Runner service: $SERVICE_ARN"
+            aws apprunner update-service \
+              --service-arn "$SERVICE_ARN" \
+              --source-configuration "{
+                \"ImageRepository\": {
+                  \"ImageIdentifier\": \"$IMAGE\",
+                  \"ImageRepositoryType\": \"ECR\"
+                }
+              }"
+          fi
+          echo "✅ App Runner deploy triggered for $SERVICE_NAME"
+
+  wizmac-report:
+    name: WIZMAC Write (mandatory)
+    needs: [build-and-push, deploy-app-runner]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
-          cache: npm
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Type check
-        run: npm run typecheck
-
-      - name: Resolve KV namespace IDs via Cloudflare API
+          node-version: '22'
+      - name: Report to WIZMAC after deploy
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WIZMAC_API_URL: https://sekani.rald.cloud
+          WIZMAC_SERVICE: ${{ github.event.repository.name }}
+          WIZMAC_ACTION: ${{ needs.deploy-app-runner.result == 'success' && 'deployed-to-aws' || 'deploy-failed' }}
+          WIZMAC_ACTOR: ${{ github.actor }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_WORKFLOW: ${{ github.workflow }}
         run: |
-          node << 'JSEOF'
-          const fs = require('fs');
-          // KV IDs already hardcoded in wrangler.toml — skip resolution
-          let currentToml = fs.readFileSync('wrangler.toml', 'utf8');
-          if (!currentToml.includes('REPLACE_WITH_')) {
-            console.log('KV namespace IDs already resolved in wrangler.toml — skipping Cloudflare API call.');
-            process.exit(0);
-          }
-          
-          const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
-          const token     = process.env.CLOUDFLARE_API_TOKEN;
-          const headers   = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
-          const base      = `https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces`;
-
-          async function listNamespaces() {
-            const r = await fetch(`${base}?per_page=100`, { headers });
-            const d = await r.json();
-            if (!d.success) throw new Error('List failed: ' + JSON.stringify(d.errors));
-            return d.result;
-          }
-          async function resolveId(title) {
-            const all = await listNamespaces();
-            const existing = all.find(n => n.title === title);
-            if (existing) { console.log(`  [existing] ${title}`); return existing.id; }
-            const r = await fetch(base, { method: 'POST', headers, body: JSON.stringify({ title }) });
-            const d = await r.json();
-            if (!d.success) { const retry = (await listNamespaces()).find(n => n.title === title); if (retry) return retry.id; throw new Error(JSON.stringify(d.errors)); }
-            console.log(`  [created]  ${title}`); return d.result.id;
-          }
-          (async () => {
-            const rateLimitId = await resolveId('rald-auth-rate-limit');
-            const sessionKvId = await resolveId('rald-session');
-            let toml = fs.readFileSync('wrangler.toml', 'utf8');
-            toml = toml.replace('REPLACE_WITH_RATE_LIMIT_KV_NAMESPACE_ID', rateLimitId);
-            toml = toml.replace('REPLACE_WITH_RALD_SESSION_KV_NAMESPACE_ID', sessionKvId);
-            fs.writeFileSync('wrangler.toml', toml);
-            console.log('wrangler.toml patched.');
-          })();
-          JSEOF
-
-      - name: Deploy rald-auth Worker
-        run: npx wrangler deploy --no-triggers || { echo "WARN: wrangler deploy failed — check token permissions. Trying without triggers."; }
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-
-      # ── Push ALL required secrets ────────────────────────────────
-
-      - name: Push RALD_JWT_SECRET
-        continue-on-error: true
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          RALD_JWT_SECRET: ${{ secrets.RALD_JWT_SECRET }}
-        run: |
-          if [ -z "$RALD_JWT_SECRET" ]; then
-            echo "WARNING: RALD_JWT_SECRET not set in org secrets."
-            echo "Add RALD_JWT_SECRET as an org-level GitHub secret to enable JWT auth."
-            echo "Current source: messenger repo secrets only. See messenger PR#15 for sync workflow."
+          if [ -f scripts/report-to-wizmac.mjs ]; then
+            node scripts/report-to-wizmac.mjs
           else
-            echo "$RALD_JWT_SECRET" | npx wrangler secret put RALD_JWT_SECRET --name rald-auth
-            echo "RALD_JWT_SECRET ✓"
+            echo "⚠️  report-to-wizmac.mjs not found — reporting inline"
+            curl -sf -X POST https://sekani.rald.cloud/api/wizmac/events \
+              -H "Content-Type: application/json" \
+              -d "{\"eventType\":\"agent_action\",\"title\":\"[$WIZMAC_SERVICE] $WIZMAC_ACTION — ${GITHUB_SHA:0:8}\",\"actor\":\"$WIZMAC_ACTOR\",\"tags\":[\"ci\",\"mandatory-report\",\"$WIZMAC_SERVICE\"]}" \
+              2>/dev/null && echo "✅ WIZMAC reported" || echo "⚠️  WIZMAC report skipped"
           fi
-
-      - name: Push SUPABASE_SERVICE_ROLE_KEY
-        continue-on-error: true
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          # SB_SECRET-001: Accept both canonical name and SB_SECRET alias set by operator.
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          SB_SECRET: ${{ secrets.SB_SECRET }}
-        run: |
-          KEY="${SUPABASE_SERVICE_ROLE_KEY:-$SB_SECRET}"
-          if [ -z "$KEY" ]; then echo "WARNING: SUPABASE_SERVICE_ROLE_KEY / SB_SECRET not set — secret must already be on worker"; exit 0; fi
-          echo "$KEY" | npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY --name rald-auth && echo "SUPABASE_SERVICE_ROLE_KEY ✓" || echo "WARNING: secret push failed — value may already be deployed"
-
-      - name: Push TERMII_API_KEY
-        continue-on-error: true
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          TERMII_API_KEY: ${{ secrets.TERMII_API_KEY }}
-        run: |
-          if [ -z "$TERMII_API_KEY" ]; then echo "WARNING: TERMII_API_KEY not set — OTP unavailable" && exit 0; fi
-          echo "$TERMII_API_KEY" | npx wrangler secret put TERMII_API_KEY --name rald-auth
-          echo "TERMII_API_KEY ✓"
-
-      - name: Push TERMII_SENDER_ID
-        continue-on-error: true
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          TERMII_SENDER_ID: ${{ secrets.TERMII_SENDER_ID }}
-        run: |
-          if [ -z "$TERMII_SENDER_ID" ]; then echo "WARNING: TERMII_SENDER_ID not set — skipping" && exit 0; fi
-          echo "$TERMII_SENDER_ID" | npx wrangler secret put TERMII_SENDER_ID --name rald-auth
-          echo "TERMII_SENDER_ID ✓"
-
-      - name: Push RESEND_API_KEY
-        continue-on-error: true
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-        run: |
-          if [ -z "$RESEND_API_KEY" ]; then echo "WARNING: RESEND_API_KEY not set — email auth unavailable" && exit 0; fi
-          echo "$RESEND_API_KEY" | npx wrangler secret put RESEND_API_KEY --name rald-auth
-          echo "RESEND_API_KEY ✓"
-
-      # ── Post-deploy smoke test ───────────────────────────────────
-      - name: Smoke test auth.rald.cloud/health
-        continue-on-error: true
-        run: |
-          sleep 5
-          STATUS=$(curl -sf -o /dev/null -w "%{http_code}" https://auth.rald.cloud/health || echo "000")
-          if [ "$STATUS" != "200" ]; then
-            echo "FATAL: post-deploy health check failed (HTTP $STATUS)" && exit 1
-          fi
-          echo "SMOKE TEST PASSED: /health returned HTTP $STATUS"
-
-
-      # ── Seed country registry (idempotent) ───────────────────────
-      # Requires tables from supabase/migrations/20260611_country_activation_framework.sql
-      # to exist. If not yet applied, run via Supabase Dashboard SQL Editor first.
-      - name: Seed country registry (idempotent — ON CONFLICT DO NOTHING)
-        continue-on-error: true
-        env:
-          SUPABASE_URL: https://onxdcikfttdmnhofsuwo.supabase.co
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          SB_SECRET: ${{ secrets.SB_SECRET }}
-        run: |
-          SUPABASE_SERVICE_ROLE_KEY="${SUPABASE_SERVICE_ROLE_KEY:-$SB_SECRET}"
-          if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
-            echo "WARNING: SUPABASE_SERVICE_ROLE_KEY not set — skipping country seed"
-            exit 0
-          fi
-          AUTH="Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY"
-          KEY="apikey: $SUPABASE_SERVICE_ROLE_KEY"
-          CT="Content-Type: application/json"
-          PREF="Prefer: resolution=ignore-duplicates,return=minimal"
-          BASE="$SUPABASE_URL/rest/v1/country_registry"
-          # Wave 1: Nigeria — ACTIVE (public beta launch country)
-          curl -sf -X POST "$BASE" -H "$AUTH" -H "$KEY" -H "$CT" -H "$PREF" \
-            -d '[{"country_code":"NG","country_name":"Nigeria","status":"ACTIVE","demand_score":100,"legal_score":90,"compliance_score":85,"moderation_score":90,"infrastructure_score":95,"support_score":90,"launch_date":"2026-06-11","legal_notes":"NITDA guidelines reviewed. NCC compliance confirmed. NDPA data protection in place.","compliance_notes":"FCCPC compliance confirmed. Identity requirements met. KYC framework active."}]' \
-            && echo "SEED: NG (ACTIVE) ✓" || echo "WARNING: NG seed failed — apply migration first"
-          # Wave 2: Kenya, Tanzania, Ghana — WAITLIST
-          curl -sf -X POST "$BASE" -H "$AUTH" -H "$KEY" -H "$CT" -H "$PREF" \
-            -d '[{"country_code":"KE","country_name":"Kenya","status":"WAITLIST","demand_score":72},{"country_code":"TZ","country_name":"Tanzania","status":"WAITLIST","demand_score":58},{"country_code":"GH","country_name":"Ghana","status":"WAITLIST","demand_score":68}]' \
-            && echo "SEED: KE/TZ/GH (WAITLIST) ✓" || echo "WARNING: wave 2 seed failed"
-          # Wave 3: South Africa, India, Indonesia — WAITLIST
-          curl -sf -X POST "$BASE" -H "$AUTH" -H "$KEY" -H "$CT" -H "$PREF" \
-            -d '[{"country_code":"ZA","country_name":"South Africa","status":"WAITLIST","demand_score":65},{"country_code":"IN","country_name":"India","status":"WAITLIST","demand_score":80},{"country_code":"ID","country_name":"Indonesia","status":"WAITLIST","demand_score":74}]' \
-            && echo "SEED: ZA/IN/ID (WAITLIST) ✓" || echo "WARNING: wave 3 seed failed"
-          echo "Country registry seed complete."
-
-      # ── C-CERT-004: Centralized Log Shipping (OpenObserve) ─────────────────
-      - name: Push OpenObserve secrets to worker (C-CERT-004)
-        continue-on-error: true
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          OPEN_OBSERVE_API_KEY: ${{ secrets.OPEN_OBSERVE_API_KEY }}
-          OPEN_OBSERVE_ENDPOINT_AUTH: ${{ secrets.OPEN_OBSERVE_ENDPOINT_AUTH }}
-        run: |
-          if [ -n "$OPEN_OBSERVE_API_KEY" ]; then
-            echo "$OPEN_OBSERVE_API_KEY" | npx wrangler secret put OPEN_OBSERVE_API_KEY --name rald-auth
-            echo "$OPEN_OBSERVE_ENDPOINT_AUTH" | npx wrangler secret put OPEN_OBSERVE_ENDPOINT --name rald-auth
-            echo "OpenObserve secrets pushed to rald-auth (C-CERT-004 resolved)"
-          else
-            echo "WARNING: OPEN_OBSERVE_API_KEY not set — add to GitHub org secrets"
-          fi
-
-      # ── Phase 1: Machine Identity + Admin alerting secrets ─────────────────
-      - name: Push MACHINE_KEY_ID to worker
-        continue-on-error: true
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          MACHINE_KEY_ID: ${{ secrets.MACHINE_KEY_ID }}
-        run: |
-          if [ -n "$MACHINE_KEY_ID" ]; then
-            echo "$MACHINE_KEY_ID" | npx wrangler secret put MACHINE_KEY_ID --name rald-auth
-            echo "MACHINE_KEY_ID ✓"
-          else
-            echo "WARNING: MACHINE_KEY_ID not set in org secrets — machine auth token exchange will fail"
-          fi
-
-      - name: Push MACHINE_KEY_SECRET to worker
-        continue-on-error: true
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          MACHINE_KEY_SECRET: ${{ secrets.MACHINE_KEY_SECRET }}
-        run: |
-          if [ -n "$MACHINE_KEY_SECRET" ]; then
-            echo "$MACHINE_KEY_SECRET" | npx wrangler secret put MACHINE_KEY_SECRET --name rald-auth
-            echo "MACHINE_KEY_SECRET ✓"
-          else
-            echo "WARNING: MACHINE_KEY_SECRET not set in org secrets — machine auth token exchange will fail"
-          fi
-
-      - name: Push ADMIN_USER_ID to worker
-        continue-on-error: true
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          ADMIN_USER_ID: ${{ secrets.RALD_ADMIN_USER_ID }}
-        run: |
-          if [ -n "$ADMIN_USER_ID" ]; then
-            echo "$ADMIN_USER_ID" | npx wrangler secret put ADMIN_USER_ID --name rald-auth
-            echo "ADMIN_USER_ID pushed to rald-auth"
-          else
-            echo "WARNING: RALD_ADMIN_USER_ID not set — rotation alerts will log-only, not send push/email"
-          fi
-      - name: Record deployment audit
-        if: always()
-        run: |
-          echo "AUDIT: service=rald-auth commit=${{ github.sha }} actor=${{ github.actor }} ts=$(date -u +%Y-%m-%dT%H:%M:%SZ) status=${{ job.status }}"
